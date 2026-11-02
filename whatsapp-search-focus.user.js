@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web — focus the search box after Cmd+F
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  When "Search messages" opens (⌘⇧F, which Hammerspoon sends for ⌘F), put the cursor in its search box.
 // @match        https://web.whatsapp.com/*
 // @run-at       document-idle
@@ -45,9 +45,13 @@
       .filter(el => {
         if (!visible(el)) return false;
         const r = el.getBoundingClientRect();
-        return r.left > innerWidth * 0.5 && r.top < 260;
+        return r.left > innerWidth * 0.4 && r.top < 260;
       });
-    return boxes.find(el => /search/i.test(label(el))) || null;
+    // Prefer a box labelled "search"; else the top-most box in that corner,
+    // since WhatsApp's editor may draw its placeholder in a separate element.
+    return boxes.find(el => /search/i.test(label(el)))
+      || boxes.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)[0]
+      || null;
   }
 
   let timer = null;
@@ -60,15 +64,24 @@
       if (box) {
         clearInterval(timer);
         if (document.activeElement !== box) box.focus();
+        console.log('[wa-search-focus] focused', box.tagName, label(box).trim());
         return;
       }
-      if (Date.now() - start > GIVE_UP_MS) clearInterval(timer);
+      if (Date.now() - start > GIVE_UP_MS) {
+        clearInterval(timer);
+        console.log('[wa-search-focus] no search box found in the top-right');
+      }
     }, POLL_MS);
   }
 
   // ⌘⇧F is the in-chat search chord; ⌘F is caught too in case Hammerspoon is
   // not running and the page sees it first.
+  // Match the LETTER (e.key), not the physical key (e.code): Kris types
+  // Colemak, where F sits on the physical E key, so e.code is 'KeyE' (1.0.0 bug).
   document.addEventListener('keydown', e => {
-    if (e.code === 'KeyF' && e.metaKey && !e.altKey && !e.ctrlKey) focusWhenReady();
+    if ((e.key || '').toLowerCase() === 'f' && e.metaKey && !e.altKey && !e.ctrlKey) {
+      console.log('[wa-search-focus] Cmd+F seen, looking for the box');
+      focusWhenReady();
+    }
   }, true);
 })();
