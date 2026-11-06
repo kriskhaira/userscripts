@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MUBI — ratings on tiles, plus IMDb, Rotten Tomatoes and Metacritic
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.3.0
+// @version      1.3.1
 // @description  One number per film on MUBI (tiles, the big top film, film pages): a critic-weighted blend of Metacritic, Rotten Tomatoes, MUBI critics, MUBI members and IMDb. Click it for the breakdown, a critic quote and links. ★ Ranked: every film you can watch, best first, filtered by score and genre. IMDb · RT · Metacritic need a free OMDb key, pasted once on any film page.
 // @author       Kris Khaira
 // @match        https://mubi.com/*
@@ -668,6 +668,7 @@
   document.head.append(el('style', { textContent: `
     .mr-navrank{display:inline-flex;align-items:center;align-self:center;gap:6px;margin:0 0 0 16px;border:2px solid currentColor;border-radius:999px;background:transparent;color:inherit;font:700 12px/1 ${FONT};letter-spacing:.06em;text-transform:uppercase;padding:6px 12px;cursor:pointer;vertical-align:middle;transition:background-color .15s,border-color .15s,color .15s}
     .mr-navrank svg{width:1em;height:1em;fill:currentColor}
+    .mr-navtext svg{width:.9em;height:.9em;fill:currentColor;vertical-align:-.08em;margin-right:5px}
     .mr-navrank:hover{background:#001AAF;border-color:#001AAF;color:#fff}
     .mr-navrank:focus-visible{outline:2px solid currentColor;outline-offset:2px}
     #mr-ranked{position:fixed;inset:0;z-index:2147482000;overflow:auto;overscroll-behavior:contain;background:#fff;color:#000;font:500 14px/1.4 ${FONT};text-align:left}
@@ -880,7 +881,20 @@
     const fill = svg && getComputedStyle(svg).fill;
     if (b && fill && /^rgb/.test(fill) && b.style.color !== fill) b.style.color = fill;
   }
+  // Wide windows get MUBI's desktop header instead (7 Nov 2026: a flex row of NOW SHOWING · BROWSE ·
+  // WATCHLIST links sharing one generated class; search there is not a link). "★ Ranked" joins that
+  // row as a fourth link wearing the same class, so it looks and hovers like MUBI's own.
+  function ensureNavText() {
+    for (const w of document.querySelectorAll('nav a[href$="/watchlist"]')) {
+      const row = w.parentElement;
+      if (!row || row.querySelector(':scope > .mr-navtext')) continue;
+      const a = el('a', { className: `${w.className} mr-navtext`, href: '#ranked', title: 'Every film you can watch now, ranked by the blended score' }, star(), 'Ranked');
+      a.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openRanked(); });
+      w.after(a);
+    }
+  }
   function ensureNavLink() {
+    ensureNavText();
     if (document.getElementById('mr-navrank')) return syncNavColour();
     const s = searchLink(), block = s && s.parentElement && s.parentElement.parentElement;
     if (!block || !block.parentElement) return;
