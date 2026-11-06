@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MUBI — ratings on tiles, plus IMDb, Rotten Tomatoes and Metacritic
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Puts MUBI's own score on every poster tile, and IMDb · Rotten Tomatoes · Metacritic on tiles and film pages (needs a free OMDb key, pasted once on any film page).
 // @author       Kris Khaira
 // @match        https://mubi.com/*
@@ -48,6 +48,7 @@
   const TTL_OMDB = 14 * DAY;
   const TTL_MISS = 3 * DAY;
   const OMDB_CAP = 950;
+  const BAD_RETRY = 10 * 60e3; // a rejected key is re-tried after 10 min (a new key works only once activated)
   const KEY_RE = /^[a-z0-9]{8}$/i;
   const TILE = { minW: 120, maxW: 900, minH: 90 };
   // /en/my/films/certified-copy · /en/films/certified-copy · /films/certified-copy (not …/player)
@@ -140,14 +141,19 @@
   async function omdb(params) {
     const key = getKey();
     if (!key) throw new OmdbStop('nokey', 'no OMDb key');
-    if (GM_getValue('omdbBad', '') === key) throw new OmdbStop('badkey', 'OMDb rejected this key');
+    const bad = GM_getValue('omdbBad', null); // { key, at, msg }; 1.0.0 stored a bare string
+    if (bad && bad.key === key && Date.now() - bad.at < BAD_RETRY) throw new OmdbStop('badkey', bad.msg || 'Invalid API key!');
     const b = budget();
     if (b.full || b.used >= OMDB_CAP) throw new OmdbStop('limit', 'OMDb daily limit reached');
     b.used++; GM_setValue('omdbBudget', b);
     const r = await omdbQ(() => get('https://www.omdbapi.com/?' + new URLSearchParams({ apikey: key, ...params })));
     const err = (r.body && r.body.Error) || '';
     if (/limit/i.test(err)) { b.full = true; GM_setValue('omdbBudget', b); throw new OmdbStop('limit', err); }
-    if (r.status === 401 || /api key/i.test(err)) { GM_setValue('omdbBad', key); throw new OmdbStop('badkey', err || 'HTTP 401'); }
+    if (r.status === 401 || /api key/i.test(err)) {
+      GM_setValue('omdbBad', { key, at: Date.now(), msg: err || 'HTTP 401' });
+      console.debug(TAG, 'OMDb rejected the key:', err || 'HTTP 401'); // the key itself is never logged
+      throw new OmdbStop('badkey', err || 'HTTP 401');
+    }
     if (r.status !== 200 || !r.body) throw new Error('OMDb HTTP ' + r.status);
     return r.body.Response === 'True' ? r.body : null;
   }
@@ -301,18 +307,24 @@
   }
 
   // ---------- film page ----------
-  function keyForm(msg) {
-    const input = el('input', { type: 'text', placeholder: 'OMDb key', autocomplete: 'off', spellcheck: false, 'aria-label': 'OMDb API key' });
+  function keyForm(msg, rejected = false) {
+    const input = el('input', { type: 'text', placeholder: rejected ? 'or paste a new key' : 'OMDb key', autocomplete: 'off', spellcheck: false, 'aria-label': 'OMDb API key' });
+    const err = note('');
     const save = () => {
       const v = input.value.trim();
-      if (!KEY_RE.test(v)) { input.classList.add('mr-bad'); input.focus(); return; }
-      GM_setValue('omdbKey', v); GM_deleteValue('omdbBad');
+      // accept the bare key, or a pasted line such as "Here is your key: 1a2b3c4d"
+      const key = KEY_RE.test(v) ? v : (v.match(/\b(?=[a-z]*\d)[a-z0-9]{8}\b/i) || [])[0];
+      if (!key) { input.classList.add('mr-bad'); err.textContent = 'That isn’t an OMDb key — paste just the 8-character key from OMDb’s email'; input.focus(); return; }
+      GM_setValue('omdbKey', key); GM_deleteValue('omdbBad');
       refreshAll();
     };
     input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') save(); });
     input.addEventListener('keyup', e => e.stopPropagation());
-    return [note(msg), ext('https://www.omdbapi.com/apikey.aspx', 'Get a free key ↗'), input,
-      el('button', { type: 'button', textContent: 'Save', onclick: save })];
+    const kids = [note(msg)];
+    if (rejected) kids.push(el('button', { type: 'button', textContent: 'Try again', onclick: () => { GM_deleteValue('omdbBad'); refreshAll(); } }));
+    else kids.push(ext('https://www.omdbapi.com/apikey.aspx', 'Get a free key ↗'));
+    kids.push(input, el('button', { type: 'button', textContent: 'Save', onclick: save }), err);
+    return kids;
   }
 
   async function fillPanel(panel, slug) {
@@ -337,7 +349,7 @@
       set(kids);
     } catch (e) {
       if (e instanceof OmdbStop) {
-        if (e.code === 'badkey') return set(keyForm('OMDb rejected the saved key. Paste it again:'));
+        if (e.code === 'badkey') return set(keyForm(`⚠️ Your key is saved, but OMDb says “${e.message}”. A new key only works after you click the activation link in OMDb’s email. Click it, then:`, true));
         if (e.code === 'limit') return set([note('OMDb’s free 1,000 lookups for today are used up — back tomorrow')]);
         if (e.code === 'nokey') return set(keyForm('IMDb · Rotten Tomatoes · Metacritic need a free OMDb key:'));
       }
