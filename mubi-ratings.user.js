@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MUBI — ratings on tiles, plus IMDb, Rotten Tomatoes and Metacritic
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.2.0
-// @description  One number per film on MUBI (tiles, the big top film, film pages): a critic-weighted blend of Metacritic, Rotten Tomatoes, MUBI critics, MUBI members and IMDb. Click it for the breakdown and links. IMDb · RT · Metacritic need a free OMDb key, pasted once on any film page.
+// @version      1.3.0
+// @description  One number per film on MUBI (tiles, the big top film, film pages): a critic-weighted blend of Metacritic, Rotten Tomatoes, MUBI critics, MUBI members and IMDb. Click it for the breakdown, a critic quote and links. ★ Ranked: every film you can watch, best first, filtered by score and genre. IMDb · RT · Metacritic need a free OMDb key, pasted once on any film page.
 // @author       Kris Khaira
 // @match        https://mubi.com/*
 // @match        https://www.mubi.com/*
@@ -89,7 +89,7 @@
     return {
       mc: num(r && r.mc), rt: num(r && r.rt), critic: f.critic || null,
       mubi: f.n > 0 ? f.avg : null, mubiN: f.n,
-      imdb: num(r && r.imdb), imdbN: num(r && r.votes) || 0,
+      imdb: num(r && r.imdb), imdbN: Math.max(0, num(r && r.votes) || 0),
     };
   }
 
@@ -164,8 +164,19 @@
   }
 
   // ---------- MUBI ----------
+  // The fields the blend and the OMDb match need; the same shape from a film call or a catalogue page.
+  const mubiFields = d => ({
+    title: d.title || '',
+    original: d.original_title || '',
+    year: d.year || null,
+    avg: d.average_rating_out_of_ten ?? (d.average_rating != null ? d.average_rating * 2 : null),
+    n: d.number_of_ratings || 0,
+    critic: d.critic_review_rating > 0 ? +d.critic_review_rating : null,
+    directors: (d.directors || []).map(x => x.name).filter(Boolean),
+    press: d.press_quote && d.press_quote.quote ? { text: String(d.press_quote.quote), source: String(d.press_quote.source || ''), url: null } : null,
+  });
   function mubiFilm(slug) {
-    const ck = 'mubi2:' + slug;
+    const ck = 'mubi3:' + slug; // 3: adds the press quote
     const c = cacheGet(ck);
     if (c) return Promise.resolve(c.d);
     return once(ck, async () => {
@@ -173,16 +184,7 @@
         { Client: 'web', 'Client-Country': country(), Accept: 'application/json' }));
       if (r.status === 404) { cacheSet(ck, null, TTL_MISS); return null; }
       if (r.status !== 200 || !r.body) throw new Error('MUBI API HTTP ' + r.status);
-      const d = r.body;
-      const f = {
-        title: d.title || '',
-        original: d.original_title || '',
-        year: d.year || null,
-        avg: d.average_rating_out_of_ten ?? (d.average_rating != null ? d.average_rating * 2 : null),
-        n: d.number_of_ratings || 0,
-        critic: d.critic_review_rating > 0 ? +d.critic_review_rating : null,
-        directors: (d.directors || []).map(x => x.name).filter(Boolean),
-      };
+      const f = mubiFields(r.body);
       cacheSet(ck, f, TTL_MUBI);
       return f;
     });
@@ -316,7 +318,7 @@
     .mr-panel input{font:500 13px ${FONT};padding:6px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.6);background:rgba(0,0,0,.7);color:#fff;width:9em;-webkit-text-security:disc}
     .mr-panel input.mr-bad{border:2px solid #fff}
     .mr-panel button.mr-btn{font:600 13px ${FONT};padding:6px 12px;border-radius:4px;border:0;background:#fff;color:#000;cursor:pointer}
-    #mr-pop{position:fixed;z-index:2147483000;width:300px;max-width:calc(100vw - 16px);box-sizing:border-box;background:#141414;color:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.5);padding:12px 14px;font:500 13px/1.4 ${FONT};text-align:left}
+    #mr-pop{position:fixed;z-index:2147483000;width:320px;max-width:calc(100vw - 16px);box-sizing:border-box;background:#141414;color:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.5);padding:12px 14px;font:500 13px/1.4 ${FONT};text-align:left}
     #mr-pop[hidden]{display:none}
     #mr-pop .mr-h{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-weight:700;font-size:14px}
     #mr-pop .mr-h .mr-score{cursor:default;pointer-events:none;background:none}
@@ -327,6 +329,9 @@
     #mr-pop td.s{text-align:right;opacity:.6;padding-left:10px;font-size:12px;white-space:nowrap}
     #mr-pop .mr-miss{opacity:.4}
     #mr-pop a{color:#fff;text-decoration:underline;text-underline-offset:2px}
+    #mr-pop .mr-sum{margin:0 0 8px;font-weight:700;font-size:13px}
+    #mr-pop .mr-quote{margin:0 0 6px;font:400 14px/1.45 "Tiempos Text","Tiempos Text Fallback",Georgia,serif}
+    #mr-pop .mr-quote cite{display:block;margin-top:4px;font:700 10px/1.35 ${FONT};letter-spacing:.06em;text-transform:uppercase;font-style:normal;opacity:.75}
     #mr-pop .mr-foot{margin-top:10px;font-size:12px;opacity:.75}
     #mr-pop .mr-warn{margin-top:8px;color:#fff;font-size:12px;font-weight:700;border-left:2px solid #fff;padding-left:8px}
   ` }));
@@ -353,6 +358,56 @@
     return fmt1(p.value) + (p.n ? ' · ' + fmtCount(p.n) : '');
   }
 
+  // One plain line from the numbers: each side's weighted distance from an average film.
+  const VERDICT = [[1.2, 'loved it'], [0.5, 'liked it'], [-0.5, 'were mixed'], [-Infinity, 'disliked it']];
+  function verdict(parts, kind) {
+    let wz = 0, w = 0;
+    for (const p of parts) if (p.kind === kind && p.we) { wz += p.we * (p.value - p.mean) / p.sd; w += p.we; }
+    return w ? VERDICT.find(([t]) => wz / w >= t)[1] : null;
+  }
+  function summary(parts) {
+    const c = verdict(parts, 'critics'), a = verdict(parts, 'audience');
+    if (c && a) return c === a ? `Critics and audiences ${c === 'were mixed' ? 'were both mixed' : 'both ' + c}.` : `Critics ${c}; audiences ${a}.`;
+    return c ? `Critics ${c}.` : a ? `Audiences ${a}.` : '';
+  }
+
+  // A quote: MUBI's press quote when it has one (about 1 film in 8), else the first sentence of
+  // the top review in MUBI's own critic reviews. Fetched only when a breakdown opens; cached.
+  function firstSentence(s) {
+    const t = String(s).replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const m = t.match(/^.{30,200}?[.!?](?=\s|$)/);
+    return m ? m[0] : t.length <= 200 ? t : t.slice(0, 200).replace(/\s+\S*$/, '') + '…';
+  }
+  function quoteFor(slug, f) {
+    if (f && f.press) return Promise.resolve(f.press);
+    const ck = 'quote:' + slug;
+    const c = cacheGet(ck);
+    if (c) return Promise.resolve(c.d);
+    return once(ck, async () => {
+      const r = await mubiQ(() => get(`https://api.mubi.com/v4/films/${encodeURIComponent(slug)}/critic_reviews?per_page=5`,
+        { Client: 'web', 'Client-Country': country(), Accept: 'application/json' }));
+      if (r.status !== 200 || !r.body) { if (r.status === 404) cacheSet(ck, null, TTL_MISS); return null; }
+      const x = (r.body.critic_reviews || []).find(v => v && v.body && String(v.body).trim());
+      const q = x ? {
+        text: firstSentence(x.body),
+        source: [(x.critics || []).map(c => c.name).filter(Boolean).join(', '), x.critic_publication && x.critic_publication.name].filter(Boolean).join(', '),
+        url: !x.dead_link && /^https?:\/\//.test(x.url || '') ? x.url : null,
+      } : null;
+      cacheSet(ck, q, q ? TTL_MUBI : TTL_MISS);
+      return q;
+    });
+  }
+  async function showQuote(box, info) {
+    try {
+      const q = await quoteFor(info.slug, info.f);
+      if (!q || !q.text || !box.isConnected) return;
+      const kids = [el('span', { textContent: `“${q.text}”` })];
+      if (q.source) kids.push(el('cite', {}, '— ', q.url ? link(q.url, q.source + ' ↗') : q.source));
+      box.replaceChildren(el('blockquote', { className: 'mr-quote' }, ...kids));
+      placePop();
+    } catch (e) { console.debug(TAG, 'quote', info.slug, e.message); }
+  }
+
   function fillPop(info) {
     const { f, r, status, why, score, parts } = info;
     const head = el('div', { className: 'mr-h' },
@@ -368,12 +423,17 @@
           el('td', { className: 's', textContent: p.share ? Math.round(p.share * 100) + '%' : '' })));
       }
     }
-    const kids = [head, table];
+    const sum = summary(parts);
+    const qbox = el('div', { className: 'mr-qbox' });
+    const kids = [head];
+    if (sum) kids.push(el('p', { className: 'mr-sum', textContent: sum }));
+    kids.push(qbox, table);
     const msg = {
       nokey: 'IMDb, Rotten Tomatoes and Metacritic need a free OMDb key — paste it under any film page’s title.',
       badkey: `OMDb rejected the saved key (“${why}”). Click the activation link in OMDb’s email, then Try again on a film page.`,
       limit: 'OMDb’s free 1,000 lookups for today are used up — back tomorrow.',
       nomatch: 'No IMDb match found, so IMDb, RT and Metacritic are missing.',
+      pending: 'IMDb, Rotten Tomatoes and Metacritic are still loading for this film, so this score uses MUBI’s ratings only.',
       error: `IMDb, RT and Metacritic didn’t load: ${why}`,
     }[status];
     if (msg) kids.push(el('div', { className: 'mr-warn', textContent: msg }));
@@ -382,6 +442,7 @@
     if (r && r.id) foot.append(' ', link(`https://letterboxd.com/imdb/${r.id}/`, 'Letterboxd ↗'));
     kids.push(foot);
     pop.replaceChildren(...kids);
+    showQuote(qbox, info);
   }
 
   function placePop() {
@@ -411,7 +472,7 @@
   document.addEventListener('click', e => {
     if (popOwner && !pop.contains(e.target) && !popOwner.contains(e.target)) closePop();
   }, true);
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && popOwner) { const b = popOwner; closePop(); b.focus(); } }, true);
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && popOwner) { const b = popOwner; closePop(); b.focus(); e.mrDone = true; } }, true);
   let rafPending = false;
   const onMove = () => { if (popOwner && !rafPending) { rafPending = true; requestAnimationFrame(() => { rafPending = false; placePop(); }); } };
   addEventListener('scroll', onMove, { capture: true, passive: true });
@@ -452,22 +513,28 @@
     return null;
   }
 
-  // Inside a tile, MUBI stacks a hover layer (z-index 5, see-through until hover) over the link,
-  // and a 111 px dark top shade (z-index 2) over the link's whole transformed box. A badge inside
-  // the link was both unclickable and dimmed. So the badge goes on the OUTERMOST positioned box
-  // that is still exactly the tile's size (the tile root: position relative, z-index 0,
-  // transform), at z-index 6 — above both, and it still grows with MUBI's hover zoom.
+  // Inside a tile, MUBI stacks a hover card (z-index 5, see-through until hover) over the link,
+  // and a dark top shade (z-index 2) over the link's transformed box. A badge inside the link was
+  // both unclickable and dimmed. So the badge goes on the tile ROOT, at z-index 6: the outermost box
+  // of exactly the tile's size that starts its own stacking layer (z-index or transform; z 0–1 at
+  // rest, raised on hover). It must never sit on a plain positioned wrapper above that root: there
+  // its z 6 escaped the tile and showed through a neighbour's expanded hover card (Kris, 6 Nov).
   const hosts = new WeakMap();
+  function ownLayer(e) {
+    const c = getComputedStyle(e);
+    return (c.position !== 'static' && c.zIndex !== 'auto') || c.transform !== 'none' || c.isolation === 'isolate' || /transform/.test(c.willChange);
+  }
   function badgeHost(a) {
     const r = a.getBoundingClientRect();
-    let host = a, p = a.parentElement;
+    let positioned = a, layer = null, p = a.parentElement;
     for (let i = 0; i < 6 && p && p !== document.body; i++, p = p.parentElement) {
       const q = p.getBoundingClientRect();
       if (!q.height) continue; // zero-height wrapper
       if (Math.abs(q.width - r.width) > 4 || Math.abs(q.height - r.height) > 4) break; // holds more than this tile
-      if (getComputedStyle(p).position !== 'static') host = p;
+      if (getComputedStyle(p).position !== 'static') positioned = p;
+      if (ownLayer(p)) layer = p;
     }
-    return host;
+    return layer || positioned;
   }
   const badgeOf = a => (hosts.get(a) || a).querySelector(':scope > .mr-badge');
 
@@ -486,7 +553,12 @@
         return;
       }
       badgeOf(a)?.remove();
-      const host = badgeHost(a); hosts.set(a, host);
+      const host = badgeHost(a);
+      // A second link to the same film inside a tile that already shows its score (an expanded
+      // hover card's own link) gets no second badge.
+      const owner = a.parentElement && a.parentElement.closest(`[data-mr-host="${CSS.escape(slug)}"]`);
+      if (owner && owner !== host && owner.querySelector(':scope > .mr-badge')) { hosts.set(a, owner); a.dataset.mr = 'shown'; return; }
+      hosts.set(a, host); host.dataset.mrHost = slug;
       if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
       host.append(el('span', { className: 'mr-badge' }, scoreButton(info)));
       a.dataset.mr = 'shown';
@@ -511,7 +583,7 @@
 
   function scanTiles() {
     for (const a of document.querySelectorAll('a[href*="/films/"]')) {
-      if (a.closest('#mr-panel, #mr-pop')) continue;
+      if (a.closest('#mr-panel, #mr-pop, #mr-ranked')) continue;
       const slug = slugOf(a);
       if (!slug) continue;
       if (a.dataset.mrSlug !== slug) {
@@ -579,9 +651,253 @@
     fillPanel(panel, slug);
   }
 
+  // ---------- the Ranked page: every film playable here, best first ----------
+  // Kris, 2026-11-06: "what about adding a filter to filter films by ratings and genre?" → a page of
+  // its own. MUBI's catalogue (browse/films?playable=true, 100 a call) brings genres, stills and
+  // MUBI's ratings and fills the per-film MUBI cache, so only OMDb is looked up per film, best-known
+  // first; a film not looked up yet shows its MUBI-only score, dimmed. Opens from "★ Ranked" beside
+  // MUBI's search icon, the Violentmonkey menu, or #ranked at the end of any MUBI address.
+  const CAT_TTL = 12 * 3600e3;
+  const MINS = [0, 60, 65, 70, 75, 80];
+  const R = {
+    box: null, open: false, gen: 0, films: [], tiles: new Map(), info: new Map(), done: 0, msg: '', lastFocus: null,
+    min: MINS.includes(+GM_getValue('rankMin', 0)) ? +GM_getValue('rankMin', 0) : 0,
+    genres: new Set(Array.isArray(GM_getValue('rankGenres', [])) ? GM_getValue('rankGenres', []) : []),
+  };
+
+  document.head.append(el('style', { textContent: `
+    .mr-navrank{display:inline-flex;align-items:center;align-self:center;gap:6px;margin:0 0 0 16px;border:2px solid currentColor;border-radius:999px;background:transparent;color:inherit;font:700 12px/1 ${FONT};letter-spacing:.06em;text-transform:uppercase;padding:6px 12px;cursor:pointer;vertical-align:middle;transition:background-color .15s,border-color .15s,color .15s}
+    .mr-navrank svg{width:1em;height:1em;fill:currentColor}
+    .mr-navrank:hover{background:#001AAF;border-color:#001AAF;color:#fff}
+    .mr-navrank:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+    #mr-ranked{position:fixed;inset:0;z-index:2147482000;overflow:auto;overscroll-behavior:contain;background:#fff;color:#000;font:500 14px/1.4 ${FONT};text-align:left}
+    #mr-ranked[hidden]{display:none}
+    #mr-ranked .mr-rk-in{max-width:1500px;margin:0 auto;padding:24px max(16px,3vw) 64px}
+    #mr-ranked .mr-rk-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+    #mr-ranked h2{margin:0;font:850 32px/1 ${FONT};text-transform:uppercase;letter-spacing:.01em;color:#000}
+    #mr-ranked .mr-rk-sub{margin:8px 0 0;max-width:64ch;color:#595959;font-size:14px}
+    #mr-ranked .mr-rk-ctrl{position:sticky;top:0;z-index:3;background:#fff;padding:16px 0 12px;margin-bottom:8px;border-bottom:1px solid #e0e0e0;display:grid;gap:10px}
+    #mr-ranked .mr-rk-line{display:flex;gap:12px;align-items:flex-start}
+    #mr-ranked .mr-rk-label{flex:none;width:52px;padding-top:9px;font:700 11px/1 ${FONT};letter-spacing:.08em;text-transform:uppercase;color:#595959}
+    #mr-ranked .mr-rk-row{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+    .mr-chip{display:inline-flex;align-items:center;gap:6px;margin:0;border:2px solid #000;border-radius:999px;background:#fff;color:#000;font:700 12px/1 ${FONT};letter-spacing:.04em;text-transform:uppercase;padding:6px 11px;cursor:pointer;transition:background-color .15s,border-color .15s,color .15s}
+    .mr-chip .mr-n{font-weight:500;opacity:.6}
+    .mr-chip[aria-pressed="true"]{background:#000;color:#fff}
+    .mr-chip:hover{background:#001AAF;border-color:#001AAF;color:#fff}
+    .mr-chip:focus-visible{outline:2px solid #001AAF;outline-offset:2px}
+    #mr-ranked .mr-rk-meta{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:13px;color:#595959}
+    #mr-ranked .mr-rk-count{font-weight:700;color:#000}
+    #mr-ranked .mr-rk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:4px}
+    #mr-ranked .mr-rt{position:relative;aspect-ratio:16/10;background:#1a1a1a;overflow:hidden}
+    #mr-ranked .mr-rt a{position:absolute;inset:0;display:block;color:#fff;text-decoration:none}
+    #mr-ranked .mr-rt img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .3s}
+    #mr-ranked .mr-rt a:hover img{transform:scale(1.04)}
+    #mr-ranked .mr-rt a::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(0,0,0,.45) 0,rgba(0,0,0,0) 32%,rgba(0,0,0,0) 45%,rgba(0,0,0,.82) 100%)}
+    #mr-ranked .mr-rt-cap{position:absolute;left:12px;right:12px;bottom:10px;z-index:1;display:grid;gap:3px}
+    #mr-ranked .mr-rt-cap b{font:700 16px/1.1 ${FONT};text-transform:uppercase}
+    #mr-ranked .mr-rt-cap small{font:700 10px/1.3 ${FONT};letter-spacing:.04em;text-transform:uppercase;opacity:.9}
+    #mr-ranked .mr-rt-rank{position:absolute;top:11px;left:12px;z-index:1;font:850 18px/1 ${FONT};color:#fff}
+    #mr-ranked .mr-rt-score{position:absolute;top:8px;right:8px;z-index:2}
+    .mr-score.mr-pending{opacity:.6}
+    #mr-ranked .mr-rk-empty{padding:40px 0;color:#595959}
+    @media (prefers-reduced-motion: reduce){#mr-ranked .mr-rt img{transition:none}}
+  ` }));
+
+  const regionName = cc => { try { return new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) || cc; } catch (_) { return cc; } };
+  function filmHref(slug) {
+    const m = location.pathname.match(/^\/([a-z]{2}(?:-[a-z]{2})?)\/([a-z]{2})(?=\/|$)/i);
+    return `${m && !NOT_COUNTRY.has(m[2].toLowerCase()) ? `/${m[1]}/${m[2]}` : ''}/films/${slug}`;
+  }
+
+  async function catalogue() {
+    const cc = country(), ck = 'cat:' + cc;
+    const c = cacheGet(ck);
+    if (c && c.d && c.d.length) return c.d;
+    const out = [];
+    for (let page = 1; page <= 30; page++) {
+      const r = await mubiQ(() => get(`https://api.mubi.com/v4/browse/films?playable=true&sort=popularity_quality_score&per_page=100&page=${page}`,
+        { Client: 'web', 'Client-Country': cc, Accept: 'application/json' }));
+      if (r.status !== 200 || !r.body) throw new Error('MUBI API HTTP ' + r.status);
+      for (const d of r.body.films || []) {
+        if (!d || !d.slug) continue;
+        const slug = String(d.slug).toLowerCase(), f = mubiFields(d);
+        if (!cacheGet('mubi3:' + slug)) cacheSet('mubi3:' + slug, f, TTL_MUBI); // saves a film call per tile later
+        out.push({ ...f, slug, genres: d.genres || [], still: (d.stills && (d.stills.medium || d.stills.small)) || d.still_url || '' });
+      }
+      if (!r.body.meta || !r.body.meta.next_page) break;
+    }
+    cacheSet(ck, out, CAT_TTL);
+    return out;
+  }
+
+  const prelim = f => ({ slug: f.slug, f, r: null, status: 'pending', why: '', ...blend(values(f, null)) });
+
+  async function scoreAll(gen) {
+    let i = 0;
+    const live = () => R.open && R.gen === gen;
+    const worker = async () => {
+      while (live() && i < R.films.length) {
+        const f = R.films[i++];
+        try { const info = await ratingsFor(f.slug); if (info && live()) R.info.set(f.slug, info); }
+        catch (e) { console.debug(TAG, f.slug, e.message); }
+        if (!live()) return;
+        R.done++; later();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+  }
+
+  let laterT = 0;
+  const later = () => { if (!laterT) laterT = setTimeout(() => { laterT = 0; renderRanked(); }, 600); };
+
+  function rankTile(f) {
+    const rank = el('span', { className: 'mr-rt-rank' });
+    const meta = [f.directors.slice(0, 2).join(', '), f.year, f.genres.slice(0, 2).join(', ')].filter(Boolean).join(' · ');
+    const a = el('a', { href: filmHref(f.slug) },
+      f.still ? el('img', { src: f.still, alt: '', loading: 'lazy', decoding: 'async' }) : null,
+      rank, el('span', { className: 'mr-rt-cap' }, el('b', { textContent: f.title }), el('small', { textContent: meta })));
+    const slot = el('span', { className: 'mr-rt-score' });
+    return { box: el('div', { className: 'mr-rt' }, a, slot), rank, slot, key: '' };
+  }
+
+  function statusText() {
+    const total = R.films.length;
+    if (R.msg) return R.msg;
+    if (!total) return 'Loading MUBI’s catalogue…';
+    if (!getKey()) return 'Scores use MUBI’s ratings only. Add a free OMDb key on any film page for IMDb, Rotten Tomatoes and Metacritic.';
+    const st = [...R.info.values()];
+    if (st.some(x => x.status === 'badkey')) return 'OMDb rejected the saved key, so scores use MUBI’s ratings only. Fix it on any film page.';
+    if (R.open && R.done < total) return `Adding IMDb, Rotten Tomatoes and Metacritic: ${R.done} of ${total} films. Dimmed scores use MUBI’s ratings until then.`;
+    const limited = st.filter(x => x.status === 'limit').length;
+    if (limited) return `OMDb’s free lookups for today ran out, so ${limited} films use MUBI’s ratings only until tomorrow.`;
+    return `All ${total} films scored.`;
+  }
+
+  function renderRanked() {
+    if (!R.box || R.box.hidden) return;
+    const rows = [];
+    for (const f of R.films) {
+      const info = R.info.get(f.slug) || prelim(f);
+      if (info.score == null || info.score < R.min) continue;
+      if (R.genres.size && !f.genres.some(g => R.genres.has(g))) continue;
+      rows.push({ f, info });
+    }
+    rows.sort((a, b) => b.info.score - a.info.score || b.f.n - a.f.n);
+    R.grid.replaceChildren(...rows.map(({ f, info }, k) => {
+      let t = R.tiles.get(f.slug);
+      if (!t) { t = rankTile(f); R.tiles.set(f.slug, t); }
+      t.rank.textContent = String(k + 1);
+      const key = info.score + ':' + info.status;
+      if (t.key !== key && !(popOwner && t.slot.contains(popOwner))) {
+        t.key = key;
+        const b = scoreButton(info);
+        if (info.status === 'pending') { b.classList.add('mr-pending'); b.title = 'MUBI’s ratings only so far: IMDb, RT and Metacritic still loading'; }
+        t.slot.replaceChildren(b);
+      }
+      return t.box;
+    }));
+    R.count.textContent = R.films.length ? `${rows.length} of ${R.films.length} films` : '';
+    R.empty.hidden = !R.films.length || rows.length > 0;
+    R.status.textContent = statusText();
+  }
+
+  function chip(kids, pressed, onclick, label) {
+    const b = el('button', { type: 'button', className: 'mr-chip', 'aria-pressed': String(pressed), onclick }, ...kids);
+    if (label) b.setAttribute('aria-label', label);
+    return b;
+  }
+  function renderControls() {
+    const pick = m => () => { R.min = m; GM_setValue('rankMin', m); renderControls(); renderRanked(); };
+    R.mins.replaceChildren(...MINS.map(m => chip([m ? `${m}+` : 'Any'], R.min === m, pick(m), m ? `Score ${m} or more` : 'Any score')));
+    const counts = new Map();
+    for (const f of R.films) for (const g of f.genres) counts.set(g, (counts.get(g) || 0) + 1);
+    for (const g of [...R.genres]) if (R.films.length && !counts.has(g)) R.genres.delete(g); // a genre no longer offered here
+    const save = () => { GM_setValue('rankGenres', [...R.genres]); renderControls(); renderRanked(); };
+    const gens = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    R.gens.replaceChildren(
+      chip(['All'], !R.genres.size, () => { R.genres.clear(); save(); }, 'All genres'),
+      ...gens.map(([g, n]) => chip([g, el('span', { className: 'mr-n', textContent: String(n) })], R.genres.has(g),
+        () => { R.genres.has(g) ? R.genres.delete(g) : R.genres.add(g); save(); }, `${g}, ${n} films`)));
+  }
+
+  function buildRanked() {
+    R.sub = el('p', { className: 'mr-rk-sub' });
+    R.mins = el('div', { className: 'mr-rk-row', role: 'group', 'aria-label': 'Minimum score' });
+    R.gens = el('div', { className: 'mr-rk-row', role: 'group', 'aria-label': 'Genres (any of)' });
+    R.count = el('span', { className: 'mr-rk-count' });
+    R.status = el('span', { className: 'mr-rk-status', role: 'status' });
+    R.grid = el('div', { className: 'mr-rk-grid' });
+    R.empty = el('p', { className: 'mr-rk-empty', textContent: 'No films match. Lower the score or pick another genre.', hidden: true });
+    R.close = el('button', { type: 'button', className: 'mr-chip', textContent: 'Close', onclick: () => closeRanked() });
+    R.box = el('div', { id: 'mr-ranked', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Ranked films', hidden: true },
+      el('div', { className: 'mr-rk-in' },
+        el('div', { className: 'mr-rk-head' }, el('div', {}, el('h2', { textContent: 'Ranked' }), R.sub), R.close),
+        el('div', { className: 'mr-rk-ctrl' },
+          el('div', { className: 'mr-rk-line' }, el('span', { className: 'mr-rk-label', textContent: 'Score' }), R.mins),
+          el('div', { className: 'mr-rk-line' }, el('span', { className: 'mr-rk-label', textContent: 'Genre' }), R.gens),
+          el('div', { className: 'mr-rk-meta' }, R.count, R.status)),
+        R.grid, R.empty));
+    document.body.append(R.box);
+  }
+
+  async function openRanked() {
+    if (!R.box) buildRanked();
+    if (R.open) return;
+    R.open = true; R.done = 0; R.msg = '';
+    const gen = ++R.gen;
+    R.lastFocus = document.activeElement;
+    R.box.hidden = false;
+    R.overflow = document.documentElement.style.overflow;
+    document.documentElement.style.overflow = 'hidden';
+    if (location.hash !== '#ranked') history.replaceState(history.state, '', location.pathname + location.search + '#ranked');
+    R.sub.textContent = `Every film you can watch on MUBI in ${regionName(country())}, best first. 60 = an average film · 70 good · 80+ great. Genres you pick are combined: any of them.`;
+    R.close.focus();
+    renderControls(); renderRanked();
+    try { R.films = await catalogue(); }
+    catch (e) { if (R.gen === gen) { R.msg = 'MUBI’s catalogue didn’t load: ' + e.message + '. Close and open again to retry.'; renderRanked(); } return; }
+    if (!R.open || R.gen !== gen) return;
+    renderControls(); renderRanked();
+    await scoreAll(gen);
+    if (R.gen === gen) renderRanked();
+  }
+  function closeRanked() {
+    if (!R.open) return;
+    R.open = false; R.gen++; closePop();
+    R.box.hidden = true;
+    document.documentElement.style.overflow = R.overflow || '';
+    if (location.hash === '#ranked') history.replaceState(history.state, '', location.pathname + location.search);
+    (R.lastFocus && R.lastFocus.isConnected ? R.lastFocus : document.getElementById('mr-navrank'))?.focus?.();
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && R.open && !e.mrDone) closeRanked(); });
+  addEventListener('hashchange', () => { if (location.hash === '#ranked') openRanked(); else if (R.open) closeRanked(); });
+
+  // "★ Ranked" beside MUBI's search icon. Markup (7 Nov 2026): nav > div(flex row: hamburger, block
+  // > div > a[href$="/search/films"]) — the button joins that row after the search block, and
+  // takes the icons' own colour (their SVG fill: white over a picture, dark on plain pages).
+  const searchLink = () => document.querySelector('nav a[href$="/search/films"]');
+  function syncNavColour() {
+    const b = document.getElementById('mr-navrank'), svg = searchLink()?.querySelector('svg');
+    const fill = svg && getComputedStyle(svg).fill;
+    if (b && fill && /^rgb/.test(fill) && b.style.color !== fill) b.style.color = fill;
+  }
+  function ensureNavLink() {
+    if (document.getElementById('mr-navrank')) return syncNavColour();
+    const s = searchLink(), block = s && s.parentElement && s.parentElement.parentElement;
+    if (!block || !block.parentElement) return;
+    const b = el('button', { id: 'mr-navrank', type: 'button', className: 'mr-navrank', title: 'Every film you can watch now, ranked by the blended score' },
+      star(), el('span', { textContent: 'Ranked' }));
+    b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openRanked(); });
+    block.after(b);
+    syncNavColour();
+  }
+  let navRaf = false;
+  addEventListener('scroll', () => { if (!navRaf) { navRaf = true; requestAnimationFrame(() => { navRaf = false; syncNavColour(); }); } }, { passive: true });
+
   // ---------- wiring ----------
   function refreshAll() {
     closePop();
+    R.info.clear(); for (const t of R.tiles.values()) t.key = '';
+    if (R.open) { closeRanked(); openRanked(); }
     document.getElementById('mr-panel')?.remove();
     document.querySelectorAll('.mr-hero').forEach(x => x.remove());
     document.querySelectorAll('.mr-badge').forEach(x => x.remove());
@@ -595,15 +911,17 @@
   let lastPath = location.pathname;
   function scan() {
     if (location.pathname !== lastPath) { lastPath = location.pathname; closePop(); document.querySelectorAll('.mr-hero').forEach(x => x.remove()); }
-    scanTiles(); ensurePanel();
+    scanTiles(); ensurePanel(); ensureNavLink();
   }
   let timer = 0;
   new MutationObserver(muts => {
-    if (muts.every(m => pop.contains(m.target))) return; // our own popover redraws
+    if (muts.every(m => pop.contains(m.target) || (R.box && R.box.contains(m.target)))) return; // our own redraws
     clearTimeout(timer); timer = setTimeout(scan, 250);
   }).observe(document.body, { childList: true, subtree: true });
   scan();
+  if (location.hash === '#ranked') openRanked();
 
+  GM_registerMenuCommand('Ranked: every film here, best first', () => openRanked());
   GM_registerMenuCommand('Set OMDb key…', () => {
     const v = prompt('Paste your OMDb API key (8 letters or digits). Free key: omdbapi.com/apikey.aspx', '');
     if (v == null) return;
