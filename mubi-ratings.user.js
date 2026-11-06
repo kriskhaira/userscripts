@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MUBI — ratings on tiles, plus IMDb, Rotten Tomatoes and Metacritic
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.1.0
+// @version      1.2.0
 // @description  One number per film on MUBI (tiles, the big top film, film pages): a critic-weighted blend of Metacritic, Rotten Tomatoes, MUBI critics, MUBI members and IMDb. Click it for the breakdown and links. IMDb · RT · Metacritic need a free OMDb key, pasted once on any film page.
 // @author       Kris Khaira
 // @match        https://mubi.com/*
@@ -36,7 +36,8 @@
 //   little evidence is pulled toward 60.
 // - Checked against Kris's own bars (Criteria — Movie Watchlist): Inside Out 2, his "good" bar
 //   (IMDb 7.6 · MC 73 · RT 91 %), comes out ~71; Spectre ~59; Venom: The Last Dance ~47;
-//   In the Mood for Love ~84. Colour: green ≥ 70, amber 55–69, red < 55.
+//   In the Mood for Love ~84. Look: MUBI's own — white outlined pill in Riforma like its TRAILER
+//   button, ★ + number like its list counts; hover fills MUBI blue #001AAF (its button hover). No colour bands.
 //
 // Data:
 // - MUBI: api.mubi.com/v4/films/<slug> (the API mubi.com uses; needs Client: web and a
@@ -106,7 +107,6 @@
     for (const p of parts) if (p.we) p.share = p.we / w;
     return { score: Math.max(1, Math.min(99, Math.round(MID + PER_SD * wz / (w + SHRINK)))), parts };
   }
-  const band = s => s >= 70 ? 'mr-good' : s >= 55 ? 'mr-mid' : 'mr-low';
 
   // ---------- storage ----------
   const cacheGet = k => { const v = GM_getValue('c:' + k); return v && v.e > Date.now() ? v : null; };
@@ -293,24 +293,33 @@
   const fmtCount = n => !n ? '' : n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n);
   const link = (href, text) => el('a', { href, target: '_blank', rel: 'noopener noreferrer', textContent: text });
   const note = text => el('span', { className: 'mr-note', textContent: text });
+  function star() {
+    const NS = 'http://www.w3.org/2000/svg', s = document.createElementNS(NS, 'svg'), p = document.createElementNS(NS, 'path');
+    s.setAttribute('viewBox', '0 0 24 24'); s.setAttribute('aria-hidden', 'true');
+    p.setAttribute('d', 'M12 1.8l3.1 6.6 7.2.9-5.3 5 1.4 7.1L12 17.9l-6.4 3.5 1.4-7.1-5.3-5 7.2-.9z');
+    s.append(p); return s;
+  }
+  const scoreFace = score => [star(), el('span', { textContent: String(score) })];
+  const FONT = 'Riforma,"Riforma Fallback",Helvetica,Arial,sans-serif'; // MUBI's own face, already loaded by the page
 
   document.head.append(el('style', { textContent: `
     .mr-badge{position:absolute;top:8px;right:8px;z-index:6;pointer-events:none}
-    .mr-score{pointer-events:auto;cursor:pointer;border:0;border-radius:4px;color:#000;font:700 13px/1 system-ui,-apple-system,sans-serif;padding:5px 7px;min-width:2.4em;box-shadow:0 1px 3px rgba(0,0,0,.45)}
+    .mr-score{pointer-events:auto;cursor:pointer;display:inline-flex;align-items:center;gap:5px;box-sizing:border-box;margin:0;border:2px solid #fff;border-radius:999px;background:rgba(0,0,0,.35);color:#fff;font:700 14px/1 ${FONT};letter-spacing:.02em;font-variant-numeric:tabular-nums;white-space:nowrap;padding:5px 11px 5px 9px;transition:background-color .15s,border-color .15s}
+    .mr-score svg{width:.95em;height:.95em;fill:currentColor;flex:none;margin-top:-.1em}
+    .mr-score:hover,.mr-score[aria-expanded="true"]{background:#001AAF;border-color:#001AAF;color:#fff}
     .mr-score:focus-visible{outline:2px solid #fff;outline-offset:2px}
-    .mr-score.mr-big{font-size:17px;padding:8px 12px}
-    .mr-good{background:#7ed37e}.mr-mid{background:#ffd666}.mr-low{background:#ff8a80}
+    .mr-score.mr-big{font-size:16px;gap:7px;padding:9px 17px 9px 14px}
     .mr-hero{margin-left:16px;align-self:center}
-    .mr-panel{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 4px;font:600 14px/1.2 system-ui,-apple-system,sans-serif}
+    .mr-panel{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0 4px;font:600 14px/1.2 ${FONT}}
     .mr-note{color:#fff;font-weight:500;font-size:13px;text-shadow:0 1px 3px rgba(0,0,0,.8)}
     .mr-pill{display:inline-flex;background:rgba(0,0,0,.74);color:#fff;padding:6px 10px;border-radius:4px;white-space:nowrap;text-decoration:none}
-    .mr-panel input{font:500 13px system-ui,-apple-system,sans-serif;padding:6px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.6);background:rgba(0,0,0,.7);color:#fff;width:9em;-webkit-text-security:disc}
-    .mr-panel input.mr-bad{border-color:#ff6b6b}
-    .mr-panel button.mr-btn{font:600 13px system-ui,-apple-system,sans-serif;padding:6px 12px;border-radius:4px;border:0;background:#fff;color:#000;cursor:pointer}
-    #mr-pop{position:fixed;z-index:2147483000;width:300px;max-width:calc(100vw - 16px);box-sizing:border-box;background:#141414;color:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.5);padding:12px 14px;font:500 13px/1.4 system-ui,-apple-system,sans-serif;text-align:left}
+    .mr-panel input{font:500 13px ${FONT};padding:6px 8px;border-radius:4px;border:1px solid rgba(255,255,255,.6);background:rgba(0,0,0,.7);color:#fff;width:9em;-webkit-text-security:disc}
+    .mr-panel input.mr-bad{border:2px solid #fff}
+    .mr-panel button.mr-btn{font:600 13px ${FONT};padding:6px 12px;border-radius:4px;border:0;background:#fff;color:#000;cursor:pointer}
+    #mr-pop{position:fixed;z-index:2147483000;width:300px;max-width:calc(100vw - 16px);box-sizing:border-box;background:#141414;color:#fff;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.5);padding:12px 14px;font:500 13px/1.4 ${FONT};text-align:left}
     #mr-pop[hidden]{display:none}
     #mr-pop .mr-h{display:flex;align-items:center;gap:10px;margin-bottom:8px;font-weight:700;font-size:14px}
-    #mr-pop .mr-h .mr-score{cursor:default;pointer-events:none}
+    #mr-pop .mr-h .mr-score{cursor:default;pointer-events:none;background:none}
     #mr-pop table{border-collapse:collapse;width:100%}
     #mr-pop th{font-weight:600;font-size:11px;letter-spacing:.04em;text-transform:uppercase;opacity:.55;text-align:left;padding:6px 0 2px}
     #mr-pop td{padding:2px 0;vertical-align:baseline}
@@ -319,7 +328,7 @@
     #mr-pop .mr-miss{opacity:.4}
     #mr-pop a{color:#fff;text-decoration:underline;text-underline-offset:2px}
     #mr-pop .mr-foot{margin-top:10px;font-size:12px;opacity:.75}
-    #mr-pop .mr-warn{margin-top:8px;color:#ffd666;font-size:12px}
+    #mr-pop .mr-warn{margin-top:8px;color:#fff;font-size:12px;font-weight:700;border-left:2px solid #fff;padding-left:8px}
   ` }));
 
   // ---------- the breakdown popover ----------
@@ -347,7 +356,7 @@
   function fillPop(info) {
     const { f, r, status, why, score, parts } = info;
     const head = el('div', { className: 'mr-h' },
-      el('span', { className: `mr-score ${band(score)}`, textContent: String(score) }),
+      el('span', { className: 'mr-score' }, ...scoreFace(score)),
       el('span', { textContent: `${f.title}${f.year ? ` (${f.year})` : ''}` }));
     const table = el('table');
     for (const kind of ['critics', 'audience']) {
@@ -410,9 +419,10 @@
 
   function scoreButton(info, big = false) {
     const b = el('button', {
-      type: 'button', className: `mr-score ${band(info.score)}${big ? ' mr-big' : ''}`, textContent: String(info.score),
-      title: 'Blended rating — click for the breakdown', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      type: 'button', className: `mr-score${big ? ' mr-big' : ''}`,
+      title: 'Blended rating — click for the breakdown', 'aria-label': `Rating ${info.score} of 100 — show the breakdown`, 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
     });
+    b.append(...scoreFace(info.score));
     const stop = e => { e.preventDefault(); e.stopPropagation(); };
     b.addEventListener('click', e => { stop(e); if (popOwner === b) closePop(); else openPop(b, info); });
     for (const t of ['mousedown', 'pointerdown', 'mouseup', 'pointerup', 'touchstart']) b.addEventListener(t, e => e.stopPropagation());
@@ -489,7 +499,9 @@
       const a = en.target; const { width: w, height: h } = en.boundingClientRect;
       if (!w || !h) continue; // hidden carousel slide: keep waiting
       io.unobserve(a);
-      const hero = w > TILE.maxW && h <= 200; // the big top film's text link
+      // The big top film's text link: wide and short. At 1470 px it is ~1124 × 132; at 960 px it is
+      // 748 × 191 with WATCH inside its box, so a narrower window needs the WATCH check too.
+      const hero = (w > TILE.maxW && h <= 200) || (h <= 260 && w >= innerWidth * 0.5 && !!heroRow(a));
       if (!hero && (w < TILE.minW || w > TILE.maxW || h < TILE.minH)) { a.dataset.mr = 'skip'; continue; }
       a.dataset.mr = 'done'; // → 'shown' once the score is on the page
       if (hero) a.dataset.mrHero = '1';
