@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MUBI — ratings on tiles, plus IMDb, Rotten Tomatoes and Metacritic
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.3.1
+// @version      1.3.2
 // @description  One number per film on MUBI (tiles, the big top film, film pages): a critic-weighted blend of Metacritic, Rotten Tomatoes, MUBI critics, MUBI members and IMDb. Click it for the breakdown, a critic quote and links. ★ Ranked: every film you can watch, best first, filtered by score and genre. IMDb · RT · Metacritic need a free OMDb key, pasted once on any film page.
 // @author       Kris Khaira
 // @match        https://mubi.com/*
@@ -332,6 +332,15 @@
     #mr-pop .mr-sum{margin:0 0 8px;font-weight:700;font-size:13px}
     #mr-pop .mr-quote{margin:0 0 6px;font:400 14px/1.45 "Tiempos Text","Tiempos Text Fallback",Georgia,serif}
     #mr-pop .mr-quote cite{display:block;margin-top:4px;font:700 10px/1.35 ${FONT};letter-spacing:.06em;text-transform:uppercase;font-style:normal;opacity:.75}
+    #mr-pop{max-height:calc(100vh - 16px);overflow:auto}
+    #mr-pop .mr-qwait{min-height:84px;margin:0 0 6px;display:grid;gap:9px;align-content:start;padding-top:4px}
+    #mr-pop .mr-qwait i{display:block;height:10px;border-radius:3px;background:rgba(255,255,255,.13);animation:mr-pulse 1.2s ease-in-out infinite alternate}
+    #mr-pop .mr-qwait i:nth-child(3){width:72%}
+    #mr-pop .mr-qwait i:nth-child(4){width:42%;height:7px;margin-top:3px}
+    #mr-pop .mr-late{animation:mr-fade .18s ease-out}
+    @keyframes mr-pulse{to{opacity:.45}}
+    @keyframes mr-fade{from{opacity:0}}
+    @media (prefers-reduced-motion: reduce){#mr-pop .mr-qwait i,#mr-pop .mr-late{animation:none}}
     #mr-pop .mr-foot{margin-top:10px;font-size:12px;opacity:.75}
     #mr-pop .mr-warn{margin-top:8px;color:#fff;font-size:12px;font-weight:700;border-left:2px solid #fff;padding-left:8px}
   ` }));
@@ -397,18 +406,29 @@
       return q;
     });
   }
+  // The quote if already known: an object, null for a known miss, undefined when it still has to be fetched.
+  function quoteNow(slug, f) {
+    if (f && f.press) return f.press;
+    const c = cacheGet('quote:' + slug);
+    return c ? c.d : undefined;
+  }
+  function renderQuote(box, q, late) {
+    box.className = 'mr-qbox';
+    if (!q || !q.text) return box.replaceChildren();
+    const kids = [el('span', { textContent: `“${q.text}”` })];
+    if (q.source) kids.push(el('cite', {}, '— ', q.url ? link(q.url, q.source + ' ↗') : q.source));
+    box.replaceChildren(el('blockquote', { className: `mr-quote${late ? ' mr-late' : ''}` }, ...kids));
+  }
+  // Only when the quote is slower than QUOTE_WAIT: the placeholder holds its space, then the quote fades in.
   async function showQuote(box, info) {
-    try {
-      const q = await quoteFor(info.slug, info.f);
-      if (!q || !q.text || !box.isConnected) return;
-      const kids = [el('span', { textContent: `“${q.text}”` })];
-      if (q.source) kids.push(el('cite', {}, '— ', q.url ? link(q.url, q.source + ' ↗') : q.source));
-      box.replaceChildren(el('blockquote', { className: 'mr-quote' }, ...kids));
-      placePop();
-    } catch (e) { console.debug(TAG, 'quote', info.slug, e.message); }
+    let q = null;
+    try { q = await quoteFor(info.slug, info.f); } catch (e) { console.debug(TAG, 'quote', info.slug, e.message); }
+    if (!box.isConnected) return;
+    renderQuote(box, q, true);
+    placePop();
   }
 
-  function fillPop(info) {
+  function fillPop(info, q) {
     const { f, r, status, why, score, parts } = info;
     const head = el('div', { className: 'mr-h' },
       el('span', { className: 'mr-score' }, ...scoreFace(score)),
@@ -442,9 +462,14 @@
     if (r && r.id) foot.append(' ', link(`https://letterboxd.com/imdb/${r.id}/`, 'Letterboxd ↗'));
     kids.push(foot);
     pop.replaceChildren(...kids);
-    showQuote(qbox, info);
+    if (q !== undefined) renderQuote(qbox, q, false);
+    else { qbox.className = 'mr-qbox mr-qwait'; qbox.setAttribute('aria-hidden', 'true'); qbox.append(el('i'), el('i'), el('i'), el('i')); showQuote(qbox, info); }
   }
 
+  // The side (below or above the score) is chosen once per open and kept, so a late quote or a scroll
+  // never flips the box (7 Nov 2026: it opened below, the quote landed, and it jumped above). Above,
+  // it hangs by its bottom edge, so it grows upwards, away from the score.
+  let popSide = null;
   function placePop() {
     if (!popOwner) return;
     if (!popOwner.isConnected) return closePop();
@@ -454,23 +479,43 @@
     let left = b.right - p.width; // tiles: hang left from a top-right badge
     if (left < 8) left = b.left; // film page / top film: the score sits at the left, so start there
     left = Math.max(8, Math.min(left, innerWidth - p.width - 8));
-    let top = b.bottom + 6;
-    if (top + p.height > innerHeight - 8) top = Math.max(8, b.top - p.height - 6);
-    pop.style.left = left + 'px'; pop.style.top = top + 'px';
+    if (!popSide) {
+      const below = innerHeight - 8 - (b.bottom + 6), above = b.top - 6 - 8;
+      popSide = p.height <= below || below >= above ? 'below' : 'above';
+    }
+    pop.style.left = left + 'px';
+    if (popSide === 'below') { pop.style.top = (b.bottom + 6) + 'px'; pop.style.bottom = 'auto'; }
+    else { pop.style.top = 'auto'; pop.style.bottom = (innerHeight - b.top + 6) + 'px'; }
   }
-  function openPop(btn, info) {
-    fillPop(info);
-    popOwner?.setAttribute('aria-expanded', 'false');
-    popOwner = btn; btn.setAttribute('aria-expanded', 'true');
+  // A click waits up to QUOTE_WAIT for an unfetched quote, so the box usually opens whole. The score
+  // turns blue at once; hovering a score for HOVER_WARM starts the fetch before the click.
+  const QUOTE_WAIT = 300, HOVER_WARM = 120;
+  let openSeq = 0, pendingBtn = null;
+  async function openPop(btn, info) {
+    const seq = ++openSeq;
+    closePop(true);
+    pendingBtn = btn; btn.setAttribute('aria-expanded', 'true');
+    let q = quoteNow(info.slug, info.f);
+    if (q === undefined) {
+      q = await Promise.race([quoteFor(info.slug, info.f).catch(() => null), new Promise(r => setTimeout(r, QUOTE_WAIT))]);
+      if (seq !== openSeq) return;
+    }
+    pendingBtn = null;
+    if (!btn.isConnected) return btn.setAttribute('aria-expanded', 'false');
+    fillPop(info, q);
+    popOwner = btn; popSide = null;
     pop.hidden = false; placePop();
   }
-  function closePop() {
+  function closePop(keepSeq) {
+    if (!keepSeq) openSeq++;
+    if (pendingBtn) { pendingBtn.setAttribute('aria-expanded', 'false'); pendingBtn = null; }
     if (!popOwner) return;
     popOwner.setAttribute('aria-expanded', 'false');
     popOwner = null; pop.hidden = true;
   }
   document.addEventListener('click', e => {
-    if (popOwner && !pop.contains(e.target) && !popOwner.contains(e.target)) closePop();
+    const o = popOwner || pendingBtn;
+    if (o && !pop.contains(e.target) && !o.contains(e.target)) closePop();
   }, true);
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && popOwner) { const b = popOwner; closePop(); b.focus(); e.mrDone = true; } }, true);
   let rafPending = false;
@@ -486,6 +531,11 @@
     b.append(...scoreFace(info.score));
     const stop = e => { e.preventDefault(); e.stopPropagation(); };
     b.addEventListener('click', e => { stop(e); if (popOwner === b) closePop(); else openPop(b, info); });
+    let warmT = 0;
+    const warm = () => { if (quoteNow(info.slug, info.f) === undefined) quoteFor(info.slug, info.f).catch(() => {}); };
+    b.addEventListener('pointerenter', () => { clearTimeout(warmT); warmT = setTimeout(warm, HOVER_WARM); });
+    b.addEventListener('pointerleave', () => clearTimeout(warmT));
+    b.addEventListener('focus', warm);
     for (const t of ['mousedown', 'pointerdown', 'mouseup', 'pointerup', 'touchstart']) b.addEventListener(t, e => e.stopPropagation());
     return b;
   }
