@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Stremio — ratings on tiles and title pages
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  One number per film or series on Stremio — poster tiles, Discover’s side panel and the title page: a critic-weighted blend of Metacritic, Rotten Tomatoes and IMDb (via a free OMDb key). Click it for the breakdown and links.
 // @author       Kris Khaira
 // @match        https://web.stremio.com/*
@@ -45,7 +45,10 @@
 // Data: OMDb by IMDb ID (?i=tt…), exact, no title guessing — Stremio's tiles link to
 // #/detail/<movie|series>/tt…. Free key = 1,000 calls a day, shared with the MUBI script (which
 // stops at its own 950), so this one stops at 400 and treats "Request limit reached!" as a full
-// day. Cache: OMDb 14 days, a miss 3 days. Tiles look up only once they scroll into view.
+// day. Cache: OMDb 14 days; an answer with no usable rating (no entry, or no ratings yet) 1 day,
+// because OMDb lags new releases (15 Nov 2026: six 2026 films IMDb already rated came back empty,
+// Resident Evil among them at IMDb 7.4 from 166k votes). Such a title gets a quiet "★ –" marker,
+// the reason on hover, so a blank never reads as broken. Tiles look up only once they scroll into view.
 // The key goes only to www.omdbapi.com; DOM is built with createElement + textContent; nothing
 // from the API is parsed as HTML.
 //
@@ -63,7 +66,7 @@ function stremioRatings(host) {
   const TAG = '[stremio-ratings]';
   const DAY = 864e5;
   const TTL_OMDB = 14 * DAY;
-  const TTL_MISS = 3 * DAY;
+  const TTL_EMPTY = DAY; // no entry, or no ratings yet: OMDb lags new releases, so ask again tomorrow
   const OMDB_CAP = 400; // of the free 1,000 a day; MUBI's script stops at its own 950
   const BAD_RETRY = 10 * 60e3; // a rejected key is re-tried after 10 min (a new key works only once activated)
   const KEY_RE = /^[a-z0-9]{8}$/i;
@@ -164,13 +167,15 @@ function stremioRatings(host) {
     };
   }
 
+  const usable = r => blend(values(r)).score != null;
   function omdbFor(id) {
     const c = cacheGet('omdb:' + id);
-    if (c) return Promise.resolve(c.d);
+    // An empty answer is trusted for a day at most, including one 1.0.0 cached for 14 days.
+    if (c && (usable(c.d) || c.e - now() <= TTL_EMPTY)) return Promise.resolve(c.d);
     return once('omdb:' + id, async () => {
       const d = await omdb({ i: id });
       const r = d ? summarise(d) : null;
-      cacheSet('omdb:' + id, r, r ? TTL_OMDB : TTL_MISS);
+      cacheSet('omdb:' + id, r, usable(r) ? TTL_OMDB : TTL_EMPTY);
       return r;
     });
   }
@@ -181,7 +186,9 @@ function stremioRatings(host) {
       let r = null, status = 'ok', why = '';
       try { r = await omdbFor(id); if (!r) status = 'nomatch'; }
       catch (e) { status = e instanceof OmdbStop ? e.code : 'error'; why = e.message; if (status === 'error') console.debug(TAG, id, e.message); }
-      return { id, type: (r && r.type) || type || 'movie', r, status, why, ...blend(values(r)) };
+      const b = blend(values(r));
+      if (status === 'ok' && b.score == null) status = 'unrated'; // OMDb knows it, rates nothing yet
+      return { id, type: (r && r.type) || type || 'movie', r, status, why, ...b };
     });
   }
 
@@ -206,7 +213,8 @@ function stremioRatings(host) {
     p.setAttribute('d', 'M12 1.8l3.1 6.6 7.2.9-5.3 5 1.4 7.1L12 17.9l-6.4 3.5 1.4-7.1-5.3-5 7.2-.9z');
     s.append(p); return s;
   }
-  const scoreFace = score => [star(), el('span', { textContent: String(score) })];
+  const scoreFace = score => [star(), el('span', { textContent: score == null ? '–' : String(score) })];
+  const QUIET = new Set(['unrated', 'nomatch']); // no score for a reason worth showing: the "★ –" marker
 
   // Stremio's own look: its font (PlusJakartaSans, inherited), its white foreground and near-black
   // background, its pill radius. White outline, no colour bands (Kris's MUBI ruling, 6 Nov 2026:
@@ -221,6 +229,8 @@ function stremioRatings(host) {
     .sr-score svg{width:.95em;height:.95em;fill:currentColor;flex:none;margin-top:-.08em}
     .sr-score:hover,.sr-score[aria-expanded="true"]{background:#fff;border-color:#fff;color:${BG}}
     .sr-score:focus-visible{outline:2px solid #fff;outline-offset:2px}
+    .sr-score.sr-none{opacity:.55;font-weight:600}
+    .sr-score.sr-none:hover,.sr-score.sr-none[aria-expanded="true"]{opacity:1}
     .sr-score.sr-big{font-size:1.1rem;font-weight:700;gap:.35em;padding:.45rem .95rem .45rem .75rem;box-shadow:none}
     .sr-row-item{flex:none;display:inline-flex;align-items:center}
     .sr-keybox{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem;margin:.75rem 0 .25rem;font-family:inherit;font-size:.95rem}
@@ -284,7 +294,8 @@ function stremioRatings(host) {
     nokey: () => `IMDb, Rotten Tomatoes and Metacritic need a free OMDb key: ${host.keyHint}.`,
     badkey: why => `OMDb rejected the saved key (“${why}”). Click the activation link in OMDb’s email, then try again: ${host.keyHint}.`,
     limit: () => 'Today’s OMDb lookups are used up (this script stops at 400 of the free 1,000, shared with MUBI) — back tomorrow.',
-    nomatch: () => 'OMDb has no entry for this IMDb ID.',
+    nomatch: () => 'No score yet: OMDb has no entry for this IMDb ID. It lags new releases; looked up again tomorrow.',
+    unrated: () => 'No score yet: OMDb has no IMDb, Rotten Tomatoes or Metacritic rating for this title. It lags new releases, so IMDb may already rate it; looked up again tomorrow.',
     error: why => `Ratings didn’t load: ${why}`,
   };
 
@@ -362,9 +373,11 @@ function stremioRatings(host) {
   addEventListener('resize', onMove, { passive: true });
 
   function scoreButton(info, big = false) {
+    const none = info.score == null;
     const b = el('button', {
-      type: 'button', className: `sr-score${big ? ' sr-big' : ''}`, tabIndex: 0,
-      title: 'Blended rating — click for the breakdown', 'aria-label': `Rating ${info.score} of 100 — show the breakdown`, 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      type: 'button', className: `sr-score${big ? ' sr-big' : ''}${none ? ' sr-none' : ''}`, tabIndex: 0,
+      title: none ? MSG[info.status]() + ' Click for links.' : 'Blended rating — click for the breakdown',
+      'aria-label': none ? 'No rating yet — show why' : `Rating ${info.score} of 100 — show the breakdown`, 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
     });
     b.dataset.srId = info.id;
     b.append(...scoreFace(info.score));
@@ -389,7 +402,7 @@ function stremioRatings(host) {
     const live = () => a.isConnected && a.dataset.srId === id;
     try {
       const info = await ratingsFor(id, type);
-      if (!live() || info.score == null) { if (live()) a.dataset.sr = 'none'; return; }
+      if (!live() || (info.score == null && !QUIET.has(info.status))) { if (live()) a.dataset.sr = 'none'; return; }
       const host_ = posterOf(a) || a;
       host_.querySelectorAll(':scope > .sr-badge').forEach(x => x.remove()); // never two
       if (getComputedStyle(host_).position === 'static') host_.style.position = 'relative';
@@ -474,7 +487,7 @@ function stremioRatings(host) {
     const live = () => slot.isConnected && slot.dataset.srId === id;
     const info = await ratingsFor(id, type);
     if (!live()) return;
-    const kids = info.score != null ? [scoreButton(info, true)] : [];
+    const kids = info.score != null || QUIET.has(info.status) ? [scoreButton(info, true)] : [];
     slot.replaceChildren(...kids);
     // The key box and plain notes go on the detail page only; Discover's narrow panel stays clean.
     const page = row.closest('[class*="meta-preview"]');

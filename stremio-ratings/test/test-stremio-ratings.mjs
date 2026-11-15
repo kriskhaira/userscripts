@@ -27,9 +27,14 @@ const ok = (cond, what, detail = '') => {
 // (omdbapi/OMDb-API issues #147, #290). One ID is unknown to OMDb.
 const SERIES_IDS = new Set(['tt0903747', 'tt0944947']);
 const UNKNOWN_ID = 'tt0077651'; // Halloween (1978): mocked as missing to test a miss
+// Picked per run from Discover's first visible tiles (its catalogue changes daily):
+// UNKNOWN = OMDb has no entry; UNRATED = OMDb has the title but no ratings, as it answered for six
+// 2026 releases on 15 Nov 2026 that IMDb already rated (Resident Evil: IMDb 7.4 from 166k votes).
+const UNKNOWN = new Set([UNKNOWN_ID]), UNRATED = new Set();
 function hash(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
 function mockFor(id, type) {
-  if (id === UNKNOWN_ID) return { Response: 'False', Error: 'Incorrect IMDb ID.' };
+  if (UNKNOWN.has(id)) return { Response: 'False', Error: 'Incorrect IMDb ID.' };
+  if (UNRATED.has(id)) return { Title: 'New film ' + id, Year: '2026', Type: 'movie', imdbID: id, imdbRating: 'N/A', imdbVotes: 'N/A', Metascore: 'N/A', Ratings: [], Response: 'True' };
   if (id === 'tt0118694') return { Title: 'In the Mood for Love', Year: '2000', Type: 'movie', imdbID: id, imdbRating: '8.0', imdbVotes: '192,000', Metascore: '87', Ratings: [{ Source: 'Internet Movie Database', Value: '8.0/10' }, { Source: 'Rotten Tomatoes', Value: '92%' }, { Source: 'Metacritic', Value: '87/100' }], Response: 'True' };
   const h = hash(id);
   const imdb = (5.2 + (h % 34) / 10).toFixed(1), votes = 500 + (h % 400000);
@@ -96,12 +101,13 @@ const go = async (b, hash) => { await b.evaluate(`location.hash = ${JSON.stringi
 // Stremio Enhanced 1.2.0 (src/preload/ui/mod/modController.ts, loadPlugin): the file is pasted into
 // this wrapper and appended as an inline <script>. The API here is an in-memory stand-in for SE's
 // IPC-backed one, with the same quirks (getSetting rejects before a config exists).
-async function injectPlugin(b, { key = KEY } = {}) {
+async function injectPlugin(b, { key = KEY, seed = [] } = {}) {
   const content = readFileSync(join(ROOT, 'stremio-ratings.plugin.js'), 'utf8');
   await b.evaluate(`(() => {
+    for (const [k, v] of ${JSON.stringify(seed)}) localStorage.setItem('stremio-ratings:' + k, JSON.stringify(v));
     if (!window.StremioEnhancedAPI) {
       const cfg = {}, cbs = {}, reg = {}; let made = false;
-      window.__seCfg = cfg;
+      window.__seCfg = cfg; window.__seReg = reg;
       window.StremioEnhancedAPI = {
         info() {}, warn() {}, error() {},
         getSetting: async (p, k) => { if (!made) throw new Error('No config found'); return cfg[k] ?? null; },
@@ -136,10 +142,10 @@ async function injectPlugin(b, { key = KEY } = {}) {
 }
 
 // Violentmonkey: the userscript with GM_* backed by a Map and fetch (the Fetch mock answers it).
-async function injectUserscript(b, { key = KEY } = {}) {
+async function injectUserscript(b, { key = KEY, seed = [] } = {}) {
   const content = readFileSync(join(ROOT, 'stremio-ratings.user.js'), 'utf8');
   await b.evaluate(`(() => {
-    const store = new Map(${JSON.stringify(key ? [['omdbKey', key]] : [])});
+    const store = new Map(${JSON.stringify([...(key ? [['omdbKey', key]] : []), ...seed])});
     window.__gmStore = store; window.__gmMenu = {};
     const GM_getValue = (k, d) => store.has(k) ? structuredClone(store.get(k)) : d;
     const GM_setValue = (k, v) => store.set(k, structuredClone(v));
@@ -152,24 +158,55 @@ async function injectUserscript(b, { key = KEY } = {}) {
   await waitFor(b, `!!document.getElementById('sr-pop')`, 5000);
 }
 
+// Stremio Enhanced 1.2.0's plugin settings box (src/components/plugin-settings-modal/: the modal
+// template and _buildInput / _buildToggle), rebuilt from the plugin's registered schema. Stremio's
+// own CSS lays each row out (label and description side by side, the label clamped to 2 lines), so
+// a long description squeezes the label: Kris's screenshot of 15 Nov 2026 showed "OM / Db… / API".
+const SE_MODAL = `((width) => {
+  const schema = window.__seReg['stremio-ratings'], values = window.__seCfg;
+  const head = s => '<div class="heading-dYMDt" style="flex: 1; padding-right: 20px; min-width: 0;"><div class="label-qI6Vh" style="font-size: 1.1em; white-space: normal; overflow: visible; text-overflow: clip; line-height: 1.4;">' + s.label + '</div>' + (s.description ? '<div style="font-size: 0.85em; color: #a0a0a0; margin-top: 4px; white-space: normal; line-height: 1.4;">' + s.description + '</div>' : '') + '</div>';
+  const rows = schema.map(s => s.type === 'toggle'
+    ? '<div class="option-vFOAS" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">' + head(s) + '<div class="content-P2T0i" style="flex-shrink: 0;"><div tabindex="0" class="toggle-container-lZfHP button-container-zVLH6 plugin-setting-toggle" data-key="' + s.key + '"><div class="toggle-toOWM"></div></div></div></div>'
+    : '<div class="option-vFOAS" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">' + head(s) + '<div class="content-P2T0i" style="flex-shrink: 0; width: 50%; max-width: 300px;"><label class="search-bar-k7MXd search-bar-container-p4tSt" style="width: 100%; padding: 0; margin: 0; display: block;"><input data-key="' + s.key + '" size="1" class="search-input-bAgAh text-input-hnLiz plugin-setting-input" type="text" placeholder="' + s.label + '" value="' + (values[s.key] ?? '') + '" style="width: 100%; box-sizing: border-box; height: 42px; padding: 0 15px;"></label></div></div>').join('');
+  document.getElementById('sr-test-se')?.remove();
+  const m = document.createElement('div');
+  m.id = 'sr-test-se';
+  m.innerHTML = '<div class="modal-container" id="stremioratingspluginjs-settings-modal" style="position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 999999; display: flex; justify-content: center; align-items: center; background-color: rgba(0, 0, 0, 0.75);"><div class="modal-dialog-container-DZMKq" style="width: ' + width + '; max-width: 800px; height: auto; max-height: 80vh; display: flex; flex-direction: column; background: rgb(15,13,32); padding: 2rem;"><div class="title-container-v2mmF">stremio-ratings Settings</div><div class="section-container-N6QHW" style="overflow-y: auto; max-height: 50vh; line-height: 1.5; padding-right: 15px;">' + rows + '</div></div></div>';
+  document.body.append(m);
+  const labels = [...m.querySelectorAll('.heading-dYMDt > .label-qI6Vh')].map(l => ({ text: l.textContent, lines: Math.round(l.getBoundingClientRect().height / parseFloat(getComputedStyle(l).lineHeight)), clipped: l.scrollWidth > l.clientWidth + 1 }));
+  const key = m.querySelector('input[data-key="omdb_key"]');
+  return { labels, masked: !!key && getComputedStyle(key).webkitTextSecurity === 'disc' };
+})`;
+async function checkSeSettings(b) {
+  for (const width of ['50%', '560px']) {
+    const r = await b.evaluate(`${SE_MODAL}(${JSON.stringify(width)})`);
+    ok(r.labels.length === 2 && r.labels.every(l => l.lines === 1 && !l.clipped), `SE settings box at ${width === '50%' ? 'half of a 1500-px window' : '560 px'}: each label fits on one line`, r.labels.map(l => `"${l.text}" ${l.lines} line${l.lines === 1 ? '' : 's'}${l.clipped ? ', clipped' : ''}`).join(' · '));
+    if (width === '50%') {
+      ok(r.masked, 'SE settings box: the OMDb key is masked, so a screenshot does not show it');
+      await shot(b, 'plugin-9-se-settings');
+    }
+  }
+  await b.evaluate(`document.getElementById('sr-test-se')?.remove()`);
+}
+
 const tilesReady = `document.querySelectorAll('a[href*="#/detail/"] [class*="poster-container"]').length > 5`;
 const LOAD = 240000; // Stremio's first load fetches its multi-MB core; a slow CDN day needs minutes
 const AUDIT = `(() => {
   const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < innerHeight; };
   const tiles = [...document.querySelectorAll('a[href*="#/detail/"]')].filter(a => a.querySelector('[class*="poster-container"]') && !a.closest('[class*="meta-preview"]'));
   const shown = tiles.filter(vis);
-  let doubles = 0, wrongId = 0, scores = [];
+  let doubles = 0, wrongId = 0, scores = [], marks = [];
   for (const a of tiles) {
     const host = a.querySelector('[class*="poster-container"]');
     const bs = host.querySelectorAll(':scope > .sr-badge');
     if (bs.length > 1) doubles++;
     const m = a.getAttribute('href').match(/(tt\\d+)/);
-    for (const b of bs) { if (b.dataset.srId !== m[1]) wrongId++; scores.push([m[1], +b.textContent]); }
+    for (const b of bs) { if (b.dataset.srId !== m[1]) wrongId++; if (b.querySelector('.sr-none')) marks.push(m[1]); else scores.push([m[1], +b.textContent]); }
   }
-  const strays = document.querySelectorAll('.sr-badge').length - scores.length;
+  const strays = document.querySelectorAll('.sr-badge').length - scores.length - marks.length;
   const rows = [...document.querySelectorAll('[class*="runtime-release-info"]')].filter(r => r.getClientRects().length);
   const rowItems = rows.map(r => r.querySelectorAll(':scope > .sr-row-item').length);
-  return { tiles: tiles.length, visible: shown.length, badged: scores.length, visibleBadged: shown.filter(a => a.querySelector('.sr-badge')).length, doubles, wrongId, strays, scores, rowItems };
+  return { tiles: tiles.length, visible: shown.length, badged: scores.length, marks, visibleBadged: shown.filter(a => a.querySelector('.sr-badge')).length, doubles, wrongId, strays, scores, rowItems };
 })()`;
 
 function checkScores(scores, label) {
@@ -186,17 +223,39 @@ async function suiteBuild(kind) {
   try {
     await b.send('Page.navigate', { url: SITE + '#/discover' });
     await waitFor(b, tilesReady, LOAD);
-    await inject(b);
+    // Tile 1 = selected (the panel tests use it). Tile 2: OMDb knows it but has no ratings yet.
+    // Tile 4: a 1.0.0-era cached empty answer with 13 of its 14 days left, which OMDb has since
+    // filled in. Tile 6: OMDb has no entry.
+    const first = await b.evaluate(`[...document.querySelectorAll('a[href*="#/detail/movie/"]')].filter(a => a.querySelector('[class*="poster-container"]') && !a.closest('[class*="meta-preview"]')).slice(0, 8).map(a => a.getAttribute('href').match(/tt\\d+/)[0])`);
+    const [, unratedId, , staleId, , unknownId] = first;
+    UNRATED.clear(); UNRATED.add(unratedId); UNKNOWN.add(unknownId);
+    const stale = { e: Date.now() + 13 * 864e5, d: { id: staleId, title: 'Film ' + staleId, year: '2026', type: 'movie', imdb: null, votes: null, rt: null, mc: null } };
+    await inject(b, { seed: [['c:omdb:' + staleId, stale]] });
     await waitFor(b, `document.querySelectorAll('.sr-badge').length >= 5`, 20000);
     await sleep(1200);
     let a = await b.evaluate(AUDIT);
-    ok(a.visibleBadged >= a.visible - 1, 'Discover: every visible poster has a score (one mocked as unknown)', `${a.visibleBadged} of ${a.visible} visible`);
+    ok(a.visibleBadged >= a.visible - 1, 'Discover: every visible poster has a score or the quiet – marker', `${a.visibleBadged} of ${a.visible} visible`);
+    const mark = await b.evaluate(`(() => { const s = document.querySelector('.sr-badge[data-sr-id="${unratedId}"] .sr-score'); return s && { none: s.classList.contains('sr-none'), text: s.textContent, title: s.title }; })()`);
+    ok(!!mark && mark.none && mark.text === '–' && /OMDb/.test(mark.title) && /new releases/.test(mark.title), 'OMDb has the title but no ratings: a quiet – marker, the reason on hover', mark ? `"${mark.text}" — ${mark.title}` : 'no marker');
+    const unk = await b.evaluate(`(() => { const s = document.querySelector('.sr-badge[data-sr-id="${unknownId}"] .sr-score'); return s && { none: s.classList.contains('sr-none'), title: s.title }; })()`);
+    ok(!!unk && unk.none && /no entry/.test(unk.title), 'OMDb has no entry: the – marker too, never a score', unk ? unk.title : 'no marker');
+    const staleShown = a.scores.find(([id]) => id === staleId);
+    ok(!!staleShown && staleShown[1] === expected(mockFor(staleId, null)) && b.calls.some(c => c.i === staleId), 'A cached empty answer is trusted for a day at most: looked up again, its score shows', staleShown ? `${staleId} ★ ${staleShown[1]}` : `${staleId} still blank`);
+    const mc = await centre(b, `document.querySelector('.sr-badge[data-sr-id="${unratedId}"] .sr-score')`);
+    if (mc) {
+      await click(b, mc.x, mc.y); await sleep(300);
+      const mp = await b.evaluate(`(() => { const p = document.getElementById('sr-pop'); return { open: !p.hidden, text: p.innerText, imdb: [...p.querySelectorAll('a')].some(x => /imdb\\.com\\/title\\/${unratedId}/.test(x.href)) }; })()`);
+      ok(mp.open && /lags new releases/.test(mp.text) && mp.imdb, 'Click the – marker: the breakdown says why and links the title on IMDb', mp.text.split('\n').find(l => /lags/.test(l)) || '');
+      await shot(b, `${kind}-0-unrated-marker`);
+      await esc(b); await sleep(200);
+    } else ok(false, 'Click the – marker: marker on screen');
+    if (kind === 'plugin') await checkSeSettings(b);
     ok(a.doubles === 0 && a.wrongId === 0 && a.strays === 0, 'Discover: no doubled, stale or stray badges', JSON.stringify({ doubles: a.doubles, wrongId: a.wrongId, strays: a.strays }));
     checkScores(a.scores, 'Discover');
     const looked = new Set(b.calls.map(c => c.i));
     ok(looked.size <= a.visible + 12 && looked.size < a.tiles, 'Only tiles in or near view are looked up', `${looked.size} lookups for ${a.tiles} tiles (${a.visible} visible)`);
     ok(b.calls.every(c => c.key === KEY && c.host === 'www.omdbapi.com'), 'Every OMDb call carries the key and goes to www.omdbapi.com');
-    ok(!b.calls.some(c => c.i === UNKNOWN_ID) || !(await b.evaluate(`!!document.querySelector('.sr-badge[data-sr-id="${UNKNOWN_ID}"]')`)), 'A title OMDb doesn\'t know gets no badge');
+
 
     // The right-hand panel
     const sel = await b.evaluate(`(() => { const s = document.querySelector('[class*="meta-item-container"].selected a[href*="#/detail/"]'); return s && s.getAttribute('href').match(/tt\\d+/)[0]; })()`);
@@ -208,7 +267,7 @@ async function suiteBuild(kind) {
     await shot(b, `${kind}-1-discover`);
 
     // Click a third tile's badge: the breakdown opens, Discover's selection and the URL stay put.
-    const target = await b.evaluate(`(() => { const bs = [...document.querySelectorAll('.sr-badge .sr-score')].filter(x => { const r = x.getBoundingClientRect(); return r.top > 60 && r.bottom < innerHeight - 20; }); const t = bs[2] || bs[0]; t.id = 'sr-test-target'; return t.closest('a').getAttribute('href'); })()`);
+    const target = await b.evaluate(`(() => { const bs = [...document.querySelectorAll('.sr-badge .sr-score:not(.sr-none)')].filter(x => { const r = x.getBoundingClientRect(); return r.top > 60 && r.bottom < innerHeight - 20; }); const t = bs[2] || bs[0]; t.id = 'sr-test-target'; return t.closest('a').getAttribute('href'); })()`);
     const before = await b.evaluate('location.hash');
     const c = await centre(b, `document.getElementById('sr-test-target')`);
     await click(b, c.x, c.y);
@@ -230,7 +289,7 @@ async function suiteBuild(kind) {
     ok(await b.evaluate(`document.getElementById('sr-pop').hidden`), 'A click elsewhere closes it');
 
     // Select another tile (click its poster, not the badge): the panel follows, still one score.
-    const other = await b.evaluate(`(() => { const as = [...document.querySelectorAll('a[href*="#/detail/"]')].filter(a => a.querySelector('.sr-badge') && !a.closest('.selected')); const a = as[1]; a.id = 'sr-test-tile'; return a.getAttribute('href').match(/tt\\d+/)[0]; })()`);
+    const other = await b.evaluate(`(() => { const as = [...document.querySelectorAll('a[href*="#/detail/"]')].filter(a => a.querySelector('.sr-badge .sr-score:not(.sr-none)') && !a.closest('.selected')); const a = as[1]; a.id = 'sr-test-tile'; return a.getAttribute('href').match(/tt\\d+/)[0]; })()`);
     const tc = await b.evaluate(`(() => { const r = document.querySelector('#sr-test-tile [class*="poster-container"]').getBoundingClientRect(); return { x: r.left + r.width * 0.3, y: r.top + r.height * 0.7 }; })()`);
     await click(b, tc.x, tc.y);
     await waitFor(b, `(() => { const s = document.querySelector('[class*="meta-preview"] .sr-row-item'); return s && s.dataset.srId === ${JSON.stringify(other)} && s.querySelector('.sr-score'); })()`, 10000).catch(() => {});

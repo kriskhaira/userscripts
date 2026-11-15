@@ -62,12 +62,22 @@
   (async () => {
     if (SE) {
       // registerSettings rejects on a reload (the schema is still registered); that's fine.
+      // SE's settings box puts each label beside its description, and Stremio's CSS clamps the
+      // label to 2 lines, so a long description squeezed "OMDb API key" to "OM / Db…" (Kris,
+      // 15 Nov 2026). Short labels and descriptions, the label kept to one line, and the key
+      // masked: SE's schema has no password type (input · toggle · select, v1.2.0), so CSS does it.
+      // The long help lives in the vault note "Stremio — ratings on tiles and title pages".
       try {
         await SE.registerSettings([
-          { key: 'omdb_key', type: 'input', label: 'OMDb API key', description: 'Free at omdbapi.com/apikey.aspx (1,000 lookups a day, shared with the MUBI script; this plugin stops at 400). Click the activation link in OMDb’s email first.', defaultValue: '' },
-          { key: 'clear_cache', type: 'toggle', label: 'Clear cached ratings', description: 'Switch on and close this box: every title is looked up again. It switches itself off.', defaultValue: false },
+          { key: 'omdb_key', type: 'input', label: 'OMDb key', description: 'Free at omdbapi.com', defaultValue: '' },
+          { key: 'clear_cache', type: 'toggle', label: 'Refresh', description: 'Look every title up again', defaultValue: false },
         ]);
       } catch (_) { /* already registered */ }
+      const css = document.createElement('style');
+      css.id = 'sr-se-settings';
+      css.textContent = '[id$="-settings-modal"]:has([data-key="omdb_key"]) [class*="heading-"] > [class*="label-"]{flex:none;white-space:nowrap}'
+        + ' .plugin-setting-input[data-key="omdb_key"]{-webkit-text-security:disc}';
+      document.head.append(css);
       try { key = String((await SE.getSetting('omdb_key')) || '').trim(); } catch (_) { key = ''; }
     } else {
       key = String(host.get('omdbKey', '') || '').trim();
