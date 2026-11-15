@@ -4,6 +4,7 @@
 #   2. each *.user.js has a ==UserScript== block with @name, @namespace and @version
 #      (a missing @namespace or a changed @name makes Violentmonkey install a second copy)
 #   3. the Stremio builds match their source (stremio-ratings/build.mjs --check)
+#   4. every offline unit test in test/ (test/test-*.mjs, e.g. the Instagram DM-title name folding)
 # The live end-to-end Stremio test (headless Chrome on web.stremio.com, OMDb mocked) runs only with
 # STREMIO_E2E=1, because it needs the network and Chrome.
 # Run: sh test.sh   · exit 0 = all passed
@@ -29,6 +30,12 @@ done
 
 if node stremio-ratings/build.mjs --check >/dev/null; then ok "stremio-ratings builds match src/"
 else bad "stremio-ratings builds are stale — run node stremio-ratings/build.mjs"; fi
+
+for t in test/test-*.mjs; do
+  [ -f "$t" ] || continue
+  if out=$(node "$t" 2>&1); then ok "$t — $(printf '%s\n' "$out" | tail -1)"
+  else bad "$t"; printf '%s\n' "$out"; fi
+done
 
 if [ "${STREMIO_E2E:-}" = "1" ]; then
   if node stremio-ratings/test/test-stremio-ratings.mjs; then ok "stremio-ratings end-to-end"
