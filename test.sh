@@ -3,7 +3,8 @@
 #   1. each *.user.js / *.plugin.js parses (node --check)
 #   2. each *.user.js has a ==UserScript== block with @name, @namespace and @version
 #      (a missing @namespace or a changed @name makes Violentmonkey install a second copy)
-#   3. the Stremio builds match their source (stremio-ratings/build.mjs --check)
+#   3. the Stremio builds match their source (stremio-ratings/build.mjs --check), and the userscript's
+#      @connect lists both hosts it calls (OMDb, IMDb's daily file)
 #   4. every offline unit test in test/ (test/test-*.mjs, e.g. the Instagram DM-title name folding)
 # The live end-to-end Stremio test (headless Chrome on web.stremio.com, OMDb mocked) runs only with
 # STREMIO_E2E=1, because it needs the network and Chrome.
@@ -27,6 +28,11 @@ for f in *.user.js; do
   done
   if [ -z "$missing" ]; then ok "$f header complete"; else bad "$f header lacks$missing"; fi
 done
+
+if sed -n '/==UserScript==/,/==\/UserScript==/p' stremio-ratings.user.js | grep -q '^// @connect *datasets.imdbws.com$' \
+  && sed -n '/==UserScript==/,/==\/UserScript==/p' stremio-ratings.user.js | grep -q '^// @connect *www.omdbapi.com$'; then
+  ok "stremio-ratings.user.js may reach OMDb and IMDb's daily file (@connect)"
+else bad "stremio-ratings.user.js lacks an @connect for www.omdbapi.com or datasets.imdbws.com"; fi
 
 if node stremio-ratings/build.mjs --check >/dev/null; then ok "stremio-ratings builds match src/"
 else bad "stremio-ratings builds are stale — run node stremio-ratings/build.mjs"; fi

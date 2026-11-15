@@ -3,6 +3,7 @@
 // numbers are not real ratings. Run: node stremio-ratings/test/test-stremio-ratings.mjs [--out DIR]
 // Exit 0 = every check passed. Screenshots go to --out (default $TMPDIR/stremio-ratings-test).
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -31,6 +32,24 @@ const UNKNOWN_ID = 'tt0077651'; // Halloween (1978): mocked as missing to test a
 // UNKNOWN = OMDb has no entry; UNRATED = OMDb has the title but no ratings, as it answered for six
 // 2026 releases on 15 Nov 2026 that IMDb already rated (Resident Evil: IMDb 7.4 from 166k votes).
 const UNKNOWN = new Set([UNKNOWN_ID]), UNRATED = new Set();
+// IMDb's daily ratings file (datasets.imdbws.com/title.ratings.tsv.gz), mocked: 300,000 filler rows
+// plus FILE's, sorted like the real one, so the stream crosses many chunks. The Matrix (Search) is
+// mocked as empty on OMDb and present in the file: a second page that needs the file the same day.
+const MATRIX = 'tt0133093';
+const FILE = new Map([[MATRIX, ['8.7', 2212345]]]);
+const CREDIT = 'Information courtesy of IMDb (https://www.imdb.com). Used with permission.';
+function ratingsGz() {
+  const rows = [];
+  for (let i = 0; i < 300000; i++) rows.push(`tt5${String(i).padStart(7, '0')}\t${(5 + (i % 40) / 10).toFixed(1)}\t${100 + (i % 9000)}`);
+  for (const [id, [r, v]] of FILE) rows.push(`${id}\t${r}\t${v}`);
+  rows.sort();
+  return gzipSync('tconst\taverageRating\tnumVotes\n' + rows.join('\n') + '\n');
+}
+// What a tile should show: OMDb's numbers, or, where OMDb has no IMDb rating, the file's alone.
+function shownFor(id) {
+  if ((UNRATED.has(id) || UNKNOWN.has(id)) && FILE.has(id)) { const [r, v] = FILE.get(id); return expected({ Response: 'True', imdbRating: r, imdbVotes: String(v), Metascore: 'N/A', Ratings: [] }); }
+  return expected(mockFor(id, null));
+}
 function hash(s) { let h = 2166136261; for (const c of s) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; }
 function mockFor(id, type) {
   if (UNKNOWN.has(id)) return { Response: 'False', Error: 'Incorrect IMDb ID.' };
@@ -66,9 +85,21 @@ async function setUp({ mode = 'mock' } = {}) {
     if ((u.includes(KEY) || body.includes(KEY)) && !u.startsWith('https://www.omdbapi.com/')) leaks.push(u.split('?')[0]);
   });
   await b.send('Network.enable');
-  await b.send('Fetch.enable', { patterns: [{ urlPattern: '*omdbapi.com*', requestStage: 'Request' }] });
+  await b.send('Fetch.enable', { patterns: [{ urlPattern: '*omdbapi.com*', requestStage: 'Request' }, { urlPattern: '*datasets.imdbws.com*', requestStage: 'Request' }] });
+  b.fileCalls = 0;
   b.on('Fetch.requestPaused', async p => {
     const u = new URL(p.request.url);
+    if (u.host === 'datasets.imdbws.com') {
+      b.fileCalls++;
+      await b.send('Fetch.fulfillRequest', {
+        requestId: p.requestId, responseCode: 200,
+        // The real server sends no CORS header; the mock adds one only because the test's GM stub
+        // and the plugin use the page's fetch (GM_xmlhttpRequest and Stremio Enhanced ignore CORS).
+        responseHeaders: [{ name: 'Content-Type', value: 'binary/octet-stream' }, { name: 'Access-Control-Allow-Origin', value: '*' }],
+        body: ratingsGz().toString('base64'),
+      }).catch(() => {});
+      return;
+    }
     calls.push({ i: u.searchParams.get('i'), key: u.searchParams.get('apikey'), host: u.host });
     const body = b.mode === 'limit' ? { Response: 'False', Error: 'Request limit reached!' } : mockFor(u.searchParams.get('i'), null);
     await b.send('Fetch.fulfillRequest', {
@@ -152,7 +183,7 @@ async function injectUserscript(b, { key = KEY, seed = [] } = {}) {
     const GM_deleteValue = k => store.delete(k);
     const GM_listValues = () => [...store.keys()];
     const GM_registerMenuCommand = (label, fn) => { window.__gmMenu[label] = fn; };
-    const GM_xmlhttpRequest = o => { fetch(o.url).then(async r => o.onload({ status: r.status, responseText: await r.text() }), () => o.onerror()); };
+    const GM_xmlhttpRequest = o => { fetch(o.url).then(async r => o.onload(o.responseType === 'arraybuffer' ? { status: r.status, response: await r.arrayBuffer() } : { status: r.status, responseText: await r.text() }), () => o.onerror()); };
     ${content}
   })()`);
   await waitFor(b, `!!document.getElementById('sr-pop')`, 5000);
@@ -211,7 +242,7 @@ const AUDIT = `(() => {
 
 function checkScores(scores, label) {
   let bad = 0;
-  for (const [id, s] of scores) { const e = expected(mockFor(id, null)); if (e !== s) { bad++; if (bad < 4) console.log(`    ${id}: shows ${s}, expected ${e}`); } }
+  for (const [id, s] of scores) { const e = shownFor(id); if (e !== s) { bad++; if (bad < 4) console.log(`    ${id}: shows ${s}, expected ${e}`); } }
   ok(scores.length > 0 && bad === 0, `${label}: every badge matches the blend recomputed from the spec`, `${scores.length} checked`);
 }
 
@@ -223,12 +254,14 @@ async function suiteBuild(kind) {
   try {
     await b.send('Page.navigate', { url: SITE + '#/discover' });
     await waitFor(b, tilesReady, LOAD);
-    // Tile 1 = selected (the panel tests use it). Tile 2: OMDb knows it but has no ratings yet.
-    // Tile 4: a 1.0.0-era cached empty answer with 13 of its 14 days left, which OMDb has since
-    // filled in. Tile 6: OMDb has no entry.
+    // Tile 1 = selected (the panel tests use it). Tile 2: OMDb knows it but has no ratings yet, and
+    // IMDb's daily file has it. Tile 4: a 1.0.0-era cached empty answer with 13 of its 14 days left,
+    // which OMDb has since filled in. Tile 6: OMDb has no entry, nor the file. Tile 7: OMDb has it
+    // unrated, and the file hasn't got it either.
     const first = await b.evaluate(`[...document.querySelectorAll('a[href*="#/detail/movie/"]')].filter(a => a.querySelector('[class*="poster-container"]') && !a.closest('[class*="meta-preview"]')).slice(0, 8).map(a => a.getAttribute('href').match(/tt\\d+/)[0])`);
-    const [, unratedId, , staleId, , unknownId] = first;
-    UNRATED.clear(); UNRATED.add(unratedId); UNKNOWN.add(unknownId);
+    const [, fileId, , staleId, , unknownId, unratedId] = first;
+    UNRATED.clear(); UNRATED.add(fileId); UNRATED.add(unratedId); UNRATED.add(MATRIX); UNKNOWN.add(unknownId);
+    FILE.set(fileId, ['7.4', 162869]); // Resident Evil's figures in the file of 14 Nov 2026
     const stale = { e: Date.now() + 13 * 864e5, d: { id: staleId, title: 'Film ' + staleId, year: '2026', type: 'movie', imdb: null, votes: null, rt: null, mc: null } };
     await inject(b, { seed: [['c:omdb:' + staleId, stale]] });
     await waitFor(b, `document.querySelectorAll('.sr-badge').length >= 5`, 20000);
@@ -239,12 +272,22 @@ async function suiteBuild(kind) {
     ok(!!mark && mark.none && mark.text === '–' && /OMDb/.test(mark.title) && /new releases/.test(mark.title), 'OMDb has the title but no ratings: a quiet – marker, the reason on hover', mark ? `"${mark.text}" — ${mark.title}` : 'no marker');
     const unk = await b.evaluate(`(() => { const s = document.querySelector('.sr-badge[data-sr-id="${unknownId}"] .sr-score'); return s && { none: s.classList.contains('sr-none'), title: s.title }; })()`);
     ok(!!unk && unk.none && /no entry/.test(unk.title), 'OMDb has no entry: the – marker too, never a score', unk ? unk.title : 'no marker');
+    const fromFile = a.scores.find(([id]) => id === fileId);
+    ok(!!fromFile && fromFile[1] === shownFor(fileId) && b.fileCalls === 1, 'OMDb has no IMDb rating but IMDb\'s daily file has: the tile shows that IMDb-only score', fromFile ? `${fileId} ★ ${fromFile[1]} (IMDb 7.4 from 162,869 votes), ${b.fileCalls} download` : `${fileId} blank, ${b.fileCalls} downloads`);
+    const fc0 = await centre(b, `document.querySelector('.sr-badge[data-sr-id="${fileId}"] .sr-score')`);
+    if (fc0) {
+      await click(b, fc0.x, fc0.y); await sleep(300);
+      const fp0 = await b.evaluate(`document.getElementById('sr-pop').innerText`);
+      ok(fp0.includes(CREDIT) && /daily file/.test(fp0), 'Its breakdown says the number is from IMDb\'s daily file, with IMDb\'s credit line', fp0.split('\n').find(l => /daily file/.test(l)) || '');
+      await shot(b, `${kind}-0-imdb-file`);
+      await esc(b); await sleep(200);
+    } else ok(false, 'Its breakdown credits IMDb: score on screen');
     const staleShown = a.scores.find(([id]) => id === staleId);
     ok(!!staleShown && staleShown[1] === expected(mockFor(staleId, null)) && b.calls.some(c => c.i === staleId), 'A cached empty answer is trusted for a day at most: looked up again, its score shows', staleShown ? `${staleId} ★ ${staleShown[1]}` : `${staleId} still blank`);
-    const mc = await centre(b, `document.querySelector('.sr-badge[data-sr-id="${unratedId}"] .sr-score')`);
+    const mc = await centre(b, `document.querySelector('.sr-badge[data-sr-id="${unknownId}"] .sr-score')`);
     if (mc) {
       await click(b, mc.x, mc.y); await sleep(300);
-      const mp = await b.evaluate(`(() => { const p = document.getElementById('sr-pop'); return { open: !p.hidden, text: p.innerText, imdb: [...p.querySelectorAll('a')].some(x => /imdb\\.com\\/title\\/${unratedId}/.test(x.href)) }; })()`);
+      const mp = await b.evaluate(`(() => { const p = document.getElementById('sr-pop'); return { open: !p.hidden, text: p.innerText, imdb: [...p.querySelectorAll('a')].some(x => /imdb\\.com\\/title\\/${unknownId}/.test(x.href)) }; })()`);
       ok(mp.open && /lags new releases/.test(mp.text) && mp.imdb, 'Click the – marker: the breakdown says why and links the title on IMDb', mp.text.split('\n').find(l => /lags/.test(l)) || '');
       await shot(b, `${kind}-0-unrated-marker`);
       await esc(b); await sleep(200);
@@ -332,8 +375,16 @@ async function suiteBuild(kind) {
       a = await b.evaluate(AUDIT);
       ok(a.visibleBadged >= Math.max(3, a.visible - 2) && a.doubles === 0 && a.wrongId === 0, `${label}: visible tiles have one score each`, `${a.visibleBadged} of ${a.visible} visible, doubles ${a.doubles}`);
       checkScores(a.scores, label);
+      if (label === 'Search') {
+        const mx = a.scores.find(([id]) => id === MATRIX);
+        ok(!!mx && mx[1] === shownFor(MATRIX) && b.fileCalls === 1, 'Search: The Matrix, empty on OMDb, is scored from the file already downloaded, with no second download', mx ? `★ ${mx[1]}, ${b.fileCalls} download` : `not shown, ${b.fileCalls} downloads`);
+      }
       await shot(b, `${kind}-6-${label.toLowerCase()}`);
     }
+    const stored = await b.evaluate(kind === 'plugin'
+      ? `Object.keys(localStorage).filter(k => k.startsWith('stremio-ratings:')).reduce((n, k) => n + k.length + localStorage.getItem(k).length, 0)`
+      : `JSON.stringify([...window.__gmStore]).length`);
+    ok(stored < 100000, 'The file\'s rows are never stored: only the asked-for titles\' answers, under 100 kB in all', `${Math.round(stored / 1000)} kB`);
     // Switch Discover to another catalogue: Stremio may reuse tiles for new titles; no stale scores.
     await go(b, '#/discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/series/top');
     await waitFor(b, `[...document.querySelectorAll('a[href*="#/detail/series/"] .sr-badge')].some(x => x.getClientRects().length)`, 30000).catch(() => {});
@@ -355,7 +406,16 @@ async function suiteBuild(kind) {
       await injectPlugin(b);
       await waitFor(b, `document.querySelectorAll('.sr-badge').length >= 5`, 20000).catch(() => {});
       await sleep(1500);
-      ok(b.calls.length === seen, 'After a reload, Discover\'s scores come from the cache: no new OMDb calls', `${b.calls.length - seen} new, ${n} cache entries`);
+      ok(b.calls.length === seen && b.fileCalls === 1, 'After a reload, Discover\'s scores come from the cache: no new OMDb calls, no second file download', `${b.calls.length - seen} new, ${n} cache entries, ${b.fileCalls} download`);
+    } else {
+      // Reload with Violentmonkey's storage empty (the stub keeps it in the page): the title needs
+      // the file again, which comes from this site's IndexedDB, not a second download.
+      await b.send('Page.navigate', { url: SITE + '#/discover' });
+      await waitFor(b, tilesReady, LOAD);
+      await injectUserscript(b);
+      await waitFor(b, `!!document.querySelector('.sr-badge[data-sr-id="${fileId}"] .sr-score:not(.sr-none)')`, 20000).catch(() => {});
+      const again = await b.evaluate(`document.querySelector('.sr-badge[data-sr-id="${fileId}"] .sr-score')?.textContent`);
+      ok(again === String(shownFor(fileId)) && b.fileCalls === 1, 'After a reload, the file is read from this site\'s IndexedDB: same score, still one download a day', `★ ${again}, ${b.fileCalls} download`);
     }
   } finally { await b.close(); }
 }

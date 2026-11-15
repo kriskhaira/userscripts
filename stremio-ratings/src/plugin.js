@@ -4,8 +4,8 @@
 //   SE keeps in stremio-ratings.plugin.json in its plugins folder, outside the page's storage.
 // - The cache lives in the page's localStorage under "stremio-ratings:", capped at 1,500 entries so
 //   it never crowds out Stremio's own data; a full store is pruned, never allowed to throw.
-// - fetch() goes only to www.omdbapi.com (it answers with Access-Control-Allow-Origin: *), with no
-//   cookies and no referrer.
+// - fetch() goes only to www.omdbapi.com (it answers with Access-Control-Allow-Origin: *) and, for
+//   IMDb's daily ratings file, to datasets.imdbws.com (no key), with no cookies and no referrer.
 (() => {
   'use strict';
   if (window.__stremioRatings) return; // SE re-runs a plugin toggled back on; one copy is enough
@@ -51,6 +51,12 @@
       key = k;
       if (SE) Promise.resolve(SE.saveSetting('omdb_key', k)).catch(e => console.debug('[stremio-ratings] key not saved:', e && e.message));
       else host.set('omdbKey', k);
+    },
+    // IMDb's daily ratings file. Its server sends no CORS header, but Stremio Enhanced 1.2.0 opens
+    // its window with webSecurity: false (src/main.ts), so fetch() can read it there.
+    async getBinary(url) {
+      const r = await fetch(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      return { status: r.status, body: r.ok ? await r.arrayBuffer() : null };
     },
     async request(url) {
       const r = await fetch(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });

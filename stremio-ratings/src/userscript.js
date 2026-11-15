@@ -1,5 +1,6 @@
 // The Violentmonkey shell: Violentmonkey's own storage (no page script can read the key) and
-// GM_xmlhttpRequest, which @connect limits to www.omdbapi.com.
+// GM_xmlhttpRequest, which @connect limits to www.omdbapi.com and datasets.imdbws.com (IMDb's daily
+// ratings file, no key).
 (() => {
   'use strict';
   const host = {
@@ -10,6 +11,15 @@
     list: () => GM_listValues(),
     getKey: () => String(GM_getValue('omdbKey', '') || '').trim(),
     saveKey: k => GM_setValue('omdbKey', k),
+    // IMDb's daily ratings file: a privileged request (its server sends no CORS header), binary.
+    getBinary: url => new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET', url, responseType: 'arraybuffer', timeout: 180000, anonymous: true,
+        onload: r => resolve({ status: r.status, body: r.response }),
+        onerror: () => reject(new Error('network error: ' + url)),
+        ontimeout: () => reject(new Error('timeout: ' + url)),
+      });
+    }),
     request: url => new Promise((resolve, reject) => {
       const bare = url.split('?')[0]; // never log the query: it holds the OMDb key
       GM_xmlhttpRequest({

@@ -2,7 +2,7 @@
  * @name Stremio Ratings
  * @description One number per film or series on Stremio — poster tiles, Discover’s side panel and the title page: a critic-weighted blend of Metacritic, Rotten Tomatoes and IMDb (via a free OMDb key). Click it for the breakdown and links.
  * @updateUrl https://raw.githubusercontent.com/kriskhaira/userscripts/main/stremio-ratings.plugin.js
- * @version 1.1.0
+ * @version 1.2.0
  * @author Kris Khaira
  * @source https://github.com/kriskhaira/userscripts
  */
@@ -36,6 +36,8 @@
 // because OMDb lags new releases (15 Nov 2026: six 2026 films IMDb already rated came back empty,
 // Resident Evil among them at IMDb 7.4 from 166k votes). Such a title gets a quiet "★ –" marker,
 // the reason on hover, so a blank never reads as broken. Tiles look up only once they scroll into view.
+// IMDb's own daily file fills a missing IMDb number (1.2.0, Kris's "445 go", 16 Nov 2026): see
+// "IMDb's daily ratings file" below.
 // The key goes only to www.omdbapi.com; DOM is built with createElement + textContent; nothing
 // from the API is parsed as HTML.
 //
@@ -167,12 +169,124 @@ function stremioRatings(host) {
     });
   }
 
-  // Everything one title needs: OMDb data (or why not) and the blend.
+  // ---------- IMDb's daily ratings file ----------
+  // OMDb lags new releases (15 Nov 2026: Resident Evil empty on OMDb, IMDb 7.4 from 166k votes). When
+  // OMDb answers with no IMDb rating, the number comes from IMDb's non-commercial dataset
+  // title.ratings.tsv.gz: ~8.8 MB gzip, 1.7M rows, refreshed daily, no key; personal, non-commercial
+  // use only, with IMDb's credit line wherever its data shows (developer.imdb.com/non-commercial-datasets).
+  // - Downloaded only when a title needs it, and at most once a day; kept as one gzip blob in this
+  //   site's IndexedDB, so a reload or a new tab reads it from disk instead of downloading again.
+  // - Read as a stream (gzip → text, chunk by chunk) for just the queued IDs, then dropped from
+  //   memory; only those IDs' numbers are cached (1 day), never the file's rows.
+  // - The server sends no CORS header: only a host with host.getBinary reads it (the userscript's
+  //   GM_xmlhttpRequest; Stremio Enhanced, whose window runs with webSecurity off). Without it, ★ –.
+  const IMDB_FILE = 'https://datasets.imdbws.com/title.ratings.tsv.gz';
+  const IMDB_CREDIT = 'Information courtesy of IMDb (https://www.imdb.com). Used with permission.';
+  const FILE_EVERY = DAY, FILE_RETRY = 60 * 60e3, TTL_FILE = DAY;
+  function fileStore(mode, fn) {
+    return new Promise((ok, fail) => {
+      const open = indexedDB.open('stremio-ratings', 1);
+      open.onupgradeneeded = () => open.result.createObjectStore('files');
+      open.onerror = () => fail(open.error);
+      open.onsuccess = () => {
+        const db = open.result, tx = db.transaction('files', mode), req = fn(tx.objectStore('files'));
+        tx.oncomplete = () => { db.close(); ok(req.result); };
+        tx.onerror = tx.onabort = () => { db.close(); fail(tx.error || new Error('IndexedDB')); };
+      };
+    });
+  }
+  async function imdbBlob() {
+    const kept = await fileStore('readonly', st => st.get('title.ratings')).catch(() => null);
+    if (kept && now() - kept.at < FILE_EVERY) return kept.blob;
+    const t = host.get('imdbFile') || {}; // when it was last downloaded, or last tried and failed
+    if (t.ok && now() - t.ok < FILE_EVERY) return kept ? kept.blob : null; // today's copy wasn't kept: no second download
+    if (t.fail && now() - t.fail < FILE_RETRY) return kept ? kept.blob : null;
+    let r;
+    try { r = await host.getBinary(IMDB_FILE); } catch (e) { r = { status: 0, why: e.message }; }
+    if (r.status !== 200 || !r.body || !r.body.byteLength) {
+      host.set('imdbFile', { ...t, fail: now() });
+      console.debug(TAG, 'IMDb file not downloaded:', r.why || 'HTTP ' + r.status);
+      return kept ? kept.blob : null;
+    }
+    host.set('imdbFile', { ok: now() });
+    const blob = new Blob([r.body]);
+    await fileStore('readwrite', st => st.put({ at: now(), blob }, 'title.ratings')).catch(e => console.debug(TAG, 'IMDb file not kept:', e && e.message));
+    return blob;
+  }
+  // One pass over the file for a set of IDs. Lines are "tconst \t averageRating \t numVotes". The
+  // bytes are read as they come (no text decoding, no string per line): only a matching line is
+  // copied out. A full pass over the 1.7M rows takes ~0.1 s; it stops early once every ID is found.
+  async function scanFile(blob, ids) {
+    const want = new Map(); // digit count and number → "tt…", so tt0133093 never matches tt00133093
+    for (const id of ids) { const m = /^tt(\d{1,10})$/.exec(id); if (m) want.set(m[1].length * 1e11 + Number(m[1]), id); }
+    const found = new Map();
+    if (!want.size) return found;
+    const reader = blob.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+    // st: 0 = reading "tt" · 1 = reading the number · 2 = not wanted, skip to the line's end · 3 = wanted, copy
+    let st = 0, tt = 0, n = 0, len = 0, id = '', line = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      for (let i = 0; i < value.length; i++) {
+        const c = value[i];
+        if (c === 10) {
+          if (st === 3) { const [r, v] = line.split('\t'); if (num(r) != null && num(v)) found.set(id, { rating: num(r), votes: num(v) }); }
+          st = 0; tt = 0; n = 0; len = 0; line = '';
+        } else if (st === 0) { if (c === 116) { if (++tt === 2) st = 1; } else st = 2; }
+        else if (st === 1) {
+          if (c >= 48 && c <= 57 && len < 10) { n = n * 10 + c - 48; len++; }
+          else if (c === 9 && want.has(len * 1e11 + n)) { id = want.get(len * 1e11 + n); st = 3; }
+          else st = 2;
+        } else if (st === 3) line += String.fromCharCode(c);
+      }
+      if (found.size === want.size) { reader.cancel().catch(() => {}); break; }
+    }
+    return found;
+  }
+  // Titles are queued for a moment so one pass serves a whole screen.
+  const fileQueue = new Map();
+  let fileTimer = 0, fileBusy = false;
+  function imdbFromFile(id) {
+    if (!host.getBinary || typeof DecompressionStream === 'undefined' || typeof indexedDB === 'undefined') return Promise.resolve(null);
+    const c = cacheGet('imdbf:' + id);
+    if (c) return Promise.resolve(c.d);
+    return new Promise(ok => {
+      if (!fileQueue.has(id)) fileQueue.set(id, []);
+      fileQueue.get(id).push(ok);
+      clearTimeout(fileTimer); fileTimer = setTimeout(runFileQueue, 600);
+    });
+  }
+  async function runFileQueue() {
+    if (fileBusy) return; // the running pass picks up whatever was queued meanwhile
+    fileBusy = true;
+    try {
+      while (fileQueue.size) {
+        const batch = new Map(fileQueue); fileQueue.clear();
+        let found = null;
+        try { const blob = await imdbBlob(); if (blob) found = await scanFile(blob, [...batch.keys()]); }
+        catch (e) { console.debug(TAG, 'IMDb file:', e.message); }
+        for (const [id, waiting] of batch) {
+          const d = found ? found.get(id) || null : null;
+          if (found) cacheSet('imdbf:' + id, d, TTL_FILE); // no file today: not cached, asked again later
+          waiting.forEach(f => f(d));
+        }
+      }
+    } finally { fileBusy = false; }
+  }
+
+  // Everything one title needs: OMDb data (or why not), IMDb's file for a missing IMDb number, the blend.
   function ratingsFor(id, type) {
     return once('rate:' + id, async () => {
       let r = null, status = 'ok', why = '';
       try { r = await omdbFor(id); if (!r) status = 'nomatch'; }
       catch (e) { status = e instanceof OmdbStop ? e.code : 'error'; why = e.message; if (status === 'error') console.debug(TAG, id, e.message); }
+      if ((status === 'ok' || status === 'nomatch') && !(r && num(r.imdb) != null && num(r.votes))) {
+        const f = await imdbFromFile(id);
+        if (f) {
+          r = { ...(r || { id, title: '', year: null, type: type || null, rt: null, mc: null }), imdb: String(f.rating), votes: String(f.votes), imdbFile: true };
+          status = 'ok';
+        }
+      }
       const b = blend(values(r));
       if (status === 'ok' && b.score == null) status = 'unrated'; // OMDb knows it, rates nothing yet
       return { id, type: (r && r.type) || type || 'movie', r, status, why, ...b };
@@ -288,7 +402,7 @@ function stremioRatings(host) {
 
   function fillPop(info) {
     const { r, status, why, score, parts } = info;
-    const title = r ? `${r.title}${r.year ? ` (${r.year})` : ''}` : info.id;
+    const title = r && r.title ? `${r.title}${r.year ? ` (${r.year})` : ''}` : info.id;
     const head = el('div', { className: 'sr-h' }, el('span', { className: 'sr-score' }, ...scoreFace(score)), el('span', { textContent: title }));
     const table = el('table');
     for (const kind of ['critics', 'audience']) {
@@ -310,10 +424,12 @@ function stremioRatings(host) {
         ? 'IMDb only: OMDb carries no Rotten Tomatoes or Metacritic score for this series, so this number is IMDb’s alone.'
         : 'IMDb only: OMDb has no Rotten Tomatoes or Metacritic score for this film, so this number is IMDb’s alone.' }));
     }
+    if (r && r.imdbFile) kids.push(el('div', { className: 'sr-warn', textContent: 'IMDb’s number is from IMDb’s own daily file: OMDb has no IMDb rating for this title yet.' }));
     if (MSG[status]) kids.push(el('div', { className: 'sr-warn', textContent: MSG[status](why) }));
     const foot = el('div', { className: 'sr-foot' }, '60 = an average film · 70 good · 80+ great. Right column = weight used.');
     if (!isSeries(info)) foot.append(' ', link(`https://letterboxd.com/imdb/${info.id}/`, 'Letterboxd ↗'));
     kids.push(foot);
+    if (r && r.imdbFile) kids.push(el('div', { className: 'sr-foot', textContent: IMDB_CREDIT }));
     pop.replaceChildren(...kids);
   }
 
@@ -544,8 +660,8 @@ function stremioRatings(host) {
 //   SE keeps in stremio-ratings.plugin.json in its plugins folder, outside the page's storage.
 // - The cache lives in the page's localStorage under "stremio-ratings:", capped at 1,500 entries so
 //   it never crowds out Stremio's own data; a full store is pruned, never allowed to throw.
-// - fetch() goes only to www.omdbapi.com (it answers with Access-Control-Allow-Origin: *), with no
-//   cookies and no referrer.
+// - fetch() goes only to www.omdbapi.com (it answers with Access-Control-Allow-Origin: *) and, for
+//   IMDb's daily ratings file, to datasets.imdbws.com (no key), with no cookies and no referrer.
 (() => {
   'use strict';
   if (window.__stremioRatings) return; // SE re-runs a plugin toggled back on; one copy is enough
@@ -591,6 +707,12 @@ function stremioRatings(host) {
       key = k;
       if (SE) Promise.resolve(SE.saveSetting('omdb_key', k)).catch(e => console.debug('[stremio-ratings] key not saved:', e && e.message));
       else host.set('omdbKey', k);
+    },
+    // IMDb's daily ratings file. Its server sends no CORS header, but Stremio Enhanced 1.2.0 opens
+    // its window with webSecurity: false (src/main.ts), so fetch() can read it there.
+    async getBinary(url) {
+      const r = await fetch(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer' });
+      return { status: r.status, body: r.ok ? await r.arrayBuffer() : null };
     },
     async request(url) {
       const r = await fetch(url, { method: 'GET', credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' });
