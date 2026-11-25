@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const {
   isIncoming, stepIndex, replyIndex, MENU_ITEM, MENU_SCOPES, isReplyItem, HOVER_EVENTS, BUBBLE,
-  arrowsFree, replyKeyOk,
+  arrowsFree, replyKeyOk, ownsKey,
 } = require('../whatsapp-reply-keys.user.js');
 const src = readFileSync(new URL('../whatsapp-reply-keys.user.js', import.meta.url), 'utf8');
 const header = src.slice(0, src.indexOf('==/UserScript=='));
@@ -21,6 +21,12 @@ const cases = [
   ['own id', isIncoming('true_601@c.us_B'), false],
   ['no id', isIncoming(undefined), false],
   ['⌥↑ with no highlight starts at the newest', stepIndex(-1, 4, -1), 3],
+  // Kris, 26 Nov 2026: "geting ®®®®® with the reply shortcut" — ⌥R is always the script's, never "®"
+  ['⌥R is the script\'s key', ownsKey('KeyR', true, false, false), true],
+  ['plain R types an r', ownsKey('KeyR', false, false, false), false],
+  ['⌘⌥R is left to the browser', ownsKey('KeyR', true, true, false), false],
+  ['⌃⌥R is left alone', ownsKey('KeyR', true, false, true), false],
+  ['⌥T is not ours', ownsKey('KeyT', true, false, false), false],
   ['⌥↓ with no highlight does nothing', stepIndex(-1, 4, 1), -1],
   ['⌥↑ steps older', stepIndex(3, 4, -1), 2],
   ['⌥↑ stops at the oldest', stepIndex(0, 4, -1), 0],
