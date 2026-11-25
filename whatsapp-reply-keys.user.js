@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         WhatsApp Web — pick a message and reply from the keyboard
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.0.0
+// @version      1.1.0
 // @description  ⌥↑ / ⌥↓ step a highlight through the open chat's messages, ⌥R replies to the highlighted one (or, with none, to their newest message), Esc clears. Never sends.
 // @match        https://web.whatsapp.com/*
 // @run-at       document-idle
+// @inject-into  content
 // @grant        none
 // @downloadURL  https://raw.githubusercontent.com/kriskhaira/userscripts/main/whatsapp-reply-keys.user.js
 // @updateURL    https://raw.githubusercontent.com/kriskhaira/userscripts/main/whatsapp-reply-keys.user.js
@@ -41,13 +42,49 @@ function replyIndex(cur, ids) {
   return ids.length - 1;
 }
 
+// The Reply item lives in the menu that just opened, never anywhere else on the page: a
+// business message's own "Reply" button, a hover icon or a hidden leftover must not match
+// (agy review, 25 Nov 2026). Every selector is scoped to an open menu container.
+const MENU_SCOPES = ['[role="application"]', '[role="menu"]'];
+const MENU_ITEM = MENU_SCOPES.map((m) => `${m} li, ${m} [role="menuitem"], ${m} [role="button"]`).join(', ');
+// item = {label, height, inMessage}: label is aria-label or text, height from
+// getBoundingClientRect(), inMessage = it sits inside a message ([data-id]), like a business
+// message's own quick-reply button, so it is never the menu's item.
+const isReplyItem = (item) => !!item && item.height > 0 && !item.inMessage
+  && /^reply$/i.test(String(item.label || '').trim());
+
+// React listens for pointer events as PointerEvent; a MouseEvent named "pointerover" can be
+// ignored. [type, constructor name, extra init] in dispatch order.
+const HOVER_EVENTS = [
+  ['pointerover', 'PointerEvent'], ['pointerenter', 'PointerEvent'],
+  ['mouseover', 'MouseEvent'], ['mouseenter', 'MouseEvent'],
+  ['pointermove', 'PointerEvent'], ['mousemove', 'MouseEvent'],
+];
+// The bubble to hover, searched INSIDE the message element (its row is an ancestor, so a
+// "[role=row] > div" selector can never match from here).
+const BUBBLE = '.message-in, .message-out';
+
+// May ⌥↑ / ⌥↓ move the highlight while focus is on this target? Not inside a text field or
+// search box (macOS uses ⌥↑/⌥↓ to jump paragraphs there), nor in the message box once it
+// holds a draft. An empty message box is fine: that is where a reply leaves the cursor.
+// t = {tag, editable, inComposer, text}
+function arrowsFree(t) {
+  if (!t) return true;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(String(t.tag || '').toUpperCase())) return false;
+  if (!t.editable) return true;
+  return !!t.inComposer && !String(t.text || '').trim();
+}
+
+// ⌥R starts a reply only on a fresh press with none in flight: a held key repeats, and a
+// second click on the chevron would close the menu the first one opened.
+const replyKeyOk = (repeat, busy) => !repeat && !busy;
+
 if (typeof document === 'undefined') {
-  module.exports = { isIncoming, stepIndex, replyIndex }; // Node, for the tests
+  module.exports = { isIncoming, stepIndex, replyIndex, MENU_ITEM, MENU_SCOPES, isReplyItem, HOVER_EVENTS, BUBBLE, arrowsFree, replyKeyOk }; // Node, for the tests
 } else (() => {
   'use strict';
 
   const MENU_BTN = '[data-icon="down-context"], [data-icon="ic-chevron-down-menu"], [aria-label="Context menu"], [aria-label="Message options"]';
-  const MENU_ITEM = '[role="application"] li, [role="menu"] [role="menuitem"], li[role="button"], div[role="button"]';
   const COMPOSER = '#main footer [contenteditable="true"]';
   const HIGHLIGHT = '2px solid #25d366';
   let sel = null; // the highlighted message element
@@ -77,23 +114,41 @@ if (typeof document === 'undefined') {
   }
 
   const hover = (el) => {
-    for (const t of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove']) {
-      el.dispatchEvent(new MouseEvent(t, { bubbles: true, view: window }));
+    const r = el.getBoundingClientRect();
+    const at = { clientX: r.left + r.width / 2, clientY: r.top + Math.min(r.height / 2, 20) };
+    for (const [t, ctor] of HOVER_EVENTS) {
+      const init = { bubbles: true, cancelable: true, composed: true, view: window, ...at };
+      el.dispatchEvent(ctor === 'PointerEvent' && typeof PointerEvent === 'function'
+        ? new PointerEvent(t, { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true })
+        : new MouseEvent(t, init));
     }
   };
 
+  let busy = false; // a reply() is in flight
   async function reply(m) {
-    hover(m.querySelector('.message-in, .message-out, [role="row"] > div') || m);
-    const icon = await waitFor(() => m.querySelector(MENU_BTN) || m.closest('[role="row"]')?.querySelector(MENU_BTN));
-    if (!icon) return console.warn('[wa-reply] no message menu found');
-    (icon.closest('[role="button"], button') || icon).click();
-    const item = await waitFor(() => [...document.querySelectorAll(MENU_ITEM)]
-      .find((li) => /^reply$/i.test((li.getAttribute('aria-label') || li.textContent || '').trim())));
-    if (!item) return console.warn('[wa-reply] no Reply item in the menu');
-    item.click();
-    highlight(null);
-    (await waitFor(() => document.querySelector(COMPOSER)))?.focus();
+    busy = true;
+    try {
+      hover(m.querySelector(BUBBLE) || m);
+      const icon = await waitFor(() => m.querySelector(MENU_BTN) || m.closest('[role="row"]')?.querySelector(MENU_BTN));
+      if (!icon) return console.warn('[wa-reply] no message menu found');
+      (icon.closest('[role="button"], button') || icon).click();
+      const item = await waitFor(() => [...document.querySelectorAll(MENU_ITEM)].find((li) => isReplyItem({
+        label: li.getAttribute('aria-label') || li.textContent,
+        height: li.getBoundingClientRect().height,
+        inMessage: !!li.closest('[data-id]'),
+      })));
+      if (!item) return console.warn('[wa-reply] no Reply item in the menu');
+      item.click();
+      highlight(null);
+      (await waitFor(() => document.querySelector(COMPOSER)))?.focus();
+    } finally { busy = false; }
   }
+
+  const focusInfo = (t) => {
+    if (!t || t === document.body) return null;
+    const composer = t.closest?.(COMPOSER) || (t.matches?.(COMPOSER) ? t : null);
+    return { tag: t.tagName, editable: !!t.isContentEditable, inComposer: !!composer, text: composer ? composer.textContent : t.textContent };
+  };
 
   addEventListener('keydown', (e) => {
     if (!e.altKey || e.metaKey || e.ctrlKey) {
@@ -104,9 +159,11 @@ if (typeof document === 'undefined') {
     const list = messages();
     let cur = sel ? list.indexOf(sel) : -1;
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+      if (!arrowsFree(focusInfo(e.target))) return; // leave ⌥↑/⌥↓ to the text field
       cur = stepIndex(cur, list.length, e.code === 'ArrowUp' ? -1 : 1);
       highlight(cur >= 0 ? list[cur] : null);
     } else if (e.code === 'KeyR') {
+      if (!replyKeyOk(e.repeat, busy)) { e.preventDefault(); e.stopPropagation(); return; }
       const i = replyIndex(cur, list.map((m) => m.getAttribute('data-id')));
       if (i >= 0) reply(list[i]);
     } else return;
