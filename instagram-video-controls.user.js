@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Instagram — video scrubber, speed, mirror, reverse
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  One control bar on the Instagram video in view: timeline scrubber, 0.5× / 1× / 2×, mirror (flip left–right), reverse playback, frame step. For studying technique clips. Sits above Instagram's own controls (a Story's reply box, heart, send).
 // @author       Kris Khaira
 // @match        https://www.instagram.com/*
@@ -39,8 +39,23 @@ function barFloor(video, rects, viewH) {
   return floor;
 }
 
+// A control counts only when it can actually be seen and clicked: an SPA leftover with
+// opacity 0, visibility hidden or pointer-events none must not lift the bar (agy review,
+// 25 Nov 2026). style = the getComputedStyle() fields used.
+function isLiveControl(style) {
+  if (!style) return true;
+  if (style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+  if (style.pointerEvents === 'none') return false;
+  return !(parseFloat(style.opacity) === 0);
+}
+
+// The bar's top: its foot sits at `bottom`, but never above the viewport's top edge + 8 px,
+// so a video scrolled mostly off the top cannot push the bar out of sight.
+const TOP_MIN = 8;
+const barTop = (bottom, height) => Math.max(TOP_MIN, bottom - height);
+
 if (typeof document === 'undefined') {
-  module.exports = { barFloor }; // Node, for the tests
+  module.exports = { barFloor, isLiveControl, barTop }; // Node, for the tests
 } else (() => {
   'use strict';
 
@@ -180,16 +195,26 @@ if (typeof document === 'undefined') {
       if (a > bestArea) { best = v; bestArea = a; }
     }
     if (best !== video) attach(best);
-    controls = video ? controlRects() : [];
+    sampleControls();
   }
-  // Instagram's clickable things on screen, re-read with each pick (every 300 ms), not each frame.
+  // Instagram's clickable things on screen, re-read with each pick (every 300 ms) and whenever
+  // the video has moved since the last read (a scroll), not on every still frame.
+  let sampledAt = null; // the video's rect when `controls` was read
+  function sampleControls() {
+    controls = video ? controlRects() : [];
+    sampledAt = video ? video.getBoundingClientRect() : null;
+  }
   const CONTROLS = 'textarea, input:not([type="range"]), [contenteditable="true"], button, [role="button"], a[href]';
   function controlRects() {
     const out = [];
     for (const n of document.querySelectorAll(CONTROLS)) {
       if (bar.contains(n)) continue;
       const q = n.getBoundingClientRect();
-      if (q.width && q.height) out.push(q);
+      if (!q.width || !q.height) continue;
+      // checkVisibility() also sees an ancestor's opacity 0 / visibility hidden (Chrome 121+).
+      if (n.checkVisibility && !n.checkVisibility({ opacityProperty: true, visibilityProperty: true })) continue;
+      if (!isLiveControl(getComputedStyle(n))) continue;
+      out.push(q);
     }
     return out;
   }
@@ -245,13 +270,17 @@ if (typeof document === 'undefined') {
     if (video) {
       if (!video.isConnected) { attach(null); }
       else {
-        const r = video.getBoundingClientRect();
+        let r = video.getBoundingClientRect();
+        if (sampledAt && (Math.abs(r.top - sampledAt.top) > 2 || Math.abs(r.left - sampledAt.left) > 2)) {
+          sampleControls(); // the page scrolled: the old control rects are stale
+          r = sampledAt;
+        }
         const bottom = barFloor(r, controls, innerHeight) - 8;
         const left = Math.max(r.left, 0) + 8;
         const right = Math.min(r.right, innerWidth) - 52; // clear Instagram's mute button
         bar.style.left = `${left}px`;
         bar.style.width = `${Math.max(right - left, 200)}px`;
-        bar.style.top = `${bottom - bar.offsetHeight}px`;
+        bar.style.top = `${barTop(bottom, bar.offsetHeight)}px`;
         if (!scrubbing && dur()) scrub.value = String(Math.round((video.currentTime / dur()) * 1000));
         time.textContent = `${fmt(video.currentTime)} / ${fmt(dur())}`;
         playBtn.textContent = video.paused && !state.reverse ? '▶' : '❚❚';

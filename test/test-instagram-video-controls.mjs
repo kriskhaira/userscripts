@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { barFloor } = require('../instagram-video-controls.user.js');
+const { barFloor, isLiveControl, barTop } = require('../instagram-video-controls.user.js');
 
 const rect = (top, bottom, left, right) => ({ top, bottom, left, right });
 // A Story frame like Kris's 25 Nov screenshot: the video fills 66–930 × 24–1560 and
@@ -27,6 +27,14 @@ const cases = [
   ['control beside the video ignored', barFloor(story, [nextArrow, rect(1500, 1540, 940, 990)], 2000), 1560],
   ['control below the video ignored', barFloor(story, [rect(1570, 1600, 100, 300)], 2000), 1560],
   ['zero-size element ignored', barFloor(story, [rect(1500, 1500, 100, 300)], 2000), 1560],
+  // agy review, 25 Nov 2026: invisible SPA leftovers are not controls; the bar stays on screen
+  ['visible control counts', isLiveControl({ opacity: '1', visibility: 'visible', pointerEvents: 'auto' }), true],
+  ['opacity 0 is skipped', isLiveControl({ opacity: '0', visibility: 'visible', pointerEvents: 'auto' }), false],
+  ['visibility hidden is skipped', isLiveControl({ opacity: '1', visibility: 'hidden', pointerEvents: 'auto' }), false],
+  ['pointer-events none is skipped', isLiveControl({ opacity: '1', visibility: 'visible', pointerEvents: 'none' }), false],
+  ['half-faded control still counts', isLiveControl({ opacity: '0.5', visibility: 'visible', pointerEvents: 'auto' }), true],
+  ['bar top normal', barTop(900, 60), 840],
+  ['bar top clamped to 8 px when the video is mostly off the top', barTop(40, 60), 8],
 ];
 
 let failed = 0;
