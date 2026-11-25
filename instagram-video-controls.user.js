@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Instagram — video scrubber, speed, mirror, reverse
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.0.0
-// @description  One control bar on the Instagram video in view: timeline scrubber, 0.5× / 1× / 2×, mirror (flip left–right), reverse playback, frame step. For studying technique clips.
+// @version      1.1.0
+// @description  One control bar on the Instagram video in view: timeline scrubber, 0.5× / 1× / 2×, mirror (flip left–right), reverse playback, frame step. For studying technique clips. Sits above Instagram's own controls (a Story's reply box, heart, send).
 // @author       Kris Khaira
 // @match        https://www.instagram.com/*
 // @run-at       document-idle
@@ -19,7 +19,29 @@
 // has buffered and choppier on long clips with few keyframes.
 // DOM is built with createElement + textContent only: Instagram enforces Trusted Types.
 
-(() => {
+// Instagram's own controls at the foot of a video (a Story's "Reply to …" box, heart and send
+// icons; a Reel's caption and audio links) must stay clickable, so the bar sits ABOVE the
+// highest one in the video's bottom strip. Pure, so Node can test it: rects are
+// {top, bottom, left, right} like getBoundingClientRect().
+const STRIP = 140;   // how far up from the video's foot we look for controls, px
+const TALL = 120;    // anything taller is an overlay covering the video, not a control
+const GAP = 6;       // space kept between the bar and the control below it
+function barFloor(video, rects, viewH) {
+  let floor = Math.min(video.bottom, viewH);
+  const stripTop = floor - STRIP;
+  for (const q of rects) {
+    const h = q.bottom - q.top;
+    if (h <= 0 || h > TALL || q.right <= q.left) continue;
+    if (q.bottom <= stripTop || q.top >= floor) continue;      // not in the bottom strip
+    if (q.right <= video.left || q.left >= video.right) continue; // not under the video
+    if (q.top - GAP < floor) floor = q.top - GAP;
+  }
+  return floor;
+}
+
+if (typeof document === 'undefined') {
+  module.exports = { barFloor }; // Node, for the tests
+} else (() => {
   'use strict';
 
   const SPEEDS = [0.5, 1, 2];
@@ -27,6 +49,7 @@
   const state = { speed: 1, mirror: false, reverse: false };
   let video = null; // the video the bar is attached to
   let scrubbing = false;
+  let controls = []; // rects of Instagram's own controls, for barFloor()
   let lastPick = 0;
 
   // ---------- build the bar ----------
@@ -157,6 +180,18 @@
       if (a > bestArea) { best = v; bestArea = a; }
     }
     if (best !== video) attach(best);
+    controls = video ? controlRects() : [];
+  }
+  // Instagram's clickable things on screen, re-read with each pick (every 300 ms), not each frame.
+  const CONTROLS = 'textarea, input:not([type="range"]), [contenteditable="true"], button, [role="button"], a[href]';
+  function controlRects() {
+    const out = [];
+    for (const n of document.querySelectorAll(CONTROLS)) {
+      if (bar.contains(n)) continue;
+      const q = n.getBoundingClientRect();
+      if (q.width && q.height) out.push(q);
+    }
+    return out;
   }
   function attach(v) {
     if (video) {
@@ -211,7 +246,7 @@
       if (!video.isConnected) { attach(null); }
       else {
         const r = video.getBoundingClientRect();
-        const bottom = Math.min(r.bottom, innerHeight) - 8;
+        const bottom = barFloor(r, controls, innerHeight) - 8;
         const left = Math.max(r.left, 0) + 8;
         const right = Math.min(r.right, innerWidth) - 52; // clear Instagram's mute button
         bar.style.left = `${left}px`;
