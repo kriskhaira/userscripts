@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Web — pick a message and reply from the keyboard
 // @namespace    https://github.com/kriskhaira/userscripts
-// @version      1.1.0
+// @version      1.1.1
 // @description  ⌥↑ / ⌥↓ step a highlight through the open chat's messages, ⌥R replies to the highlighted one (or, with none, to their newest message), Esc clears. Never sends.
 // @match        https://web.whatsapp.com/*
 // @run-at       document-idle
@@ -79,8 +79,12 @@ function arrowsFree(t) {
 // second click on the chevron would close the menu the first one opened.
 const replyKeyOk = (repeat, busy) => !repeat && !busy;
 
+// ⌥R is this script's key on WhatsApp Web, so it never falls through to macOS, which types "®"
+// (Kris, 26 Nov 2026: "geting ®®®®® with the reply shortcut"). True for ⌥R and ⌥⇧R alone.
+const ownsKey = (code, alt, meta, ctrl) => code === 'KeyR' && !!alt && !meta && !ctrl;
+
 if (typeof document === 'undefined') {
-  module.exports = { isIncoming, stepIndex, replyIndex, MENU_ITEM, MENU_SCOPES, isReplyItem, HOVER_EVENTS, BUBBLE, arrowsFree, replyKeyOk }; // Node, for the tests
+  module.exports = { isIncoming, stepIndex, replyIndex, MENU_ITEM, MENU_SCOPES, isReplyItem, HOVER_EVENTS, BUBBLE, arrowsFree, replyKeyOk, ownsKey }; // Node, for the tests
 } else (() => {
   'use strict';
 
@@ -150,12 +154,32 @@ if (typeof document === 'undefined') {
     return { tag: t.tagName, editable: !!t.isContentEditable, inComposer: !!composer, text: composer ? composer.textContent : t.textContent };
   };
 
+  // A short note in the corner when a key can't act, instead of nothing happening.
+  let tip = null;
+  function toast(text) {
+    if (!tip) {
+      tip = document.createElement('div');
+      tip.style.cssText = 'position:fixed;right:16px;bottom:88px;z-index:99999;padding:8px 12px;border-radius:8px;' +
+        'background:#25d366;color:#111;font:500 13px system-ui;box-shadow:0 2px 8px #0006;pointer-events:none';
+      document.body.appendChild(tip);
+    }
+    tip.textContent = 'Reply keys: ' + text;
+    tip.style.display = 'block';
+    clearTimeout(tip.t);
+    tip.t = setTimeout(() => { tip.style.display = 'none'; }, 2500);
+  }
+
   addEventListener('keydown', (e) => {
     if (!e.altKey || e.metaKey || e.ctrlKey) {
       if (e.key === 'Escape' && sel) highlight(null);
       return;
     }
-    if (!document.querySelector('#main')) return;
+    // ⌥R never types "®", whatever happens next
+    if (ownsKey(e.code, e.altKey, e.metaKey, e.ctrlKey)) { e.preventDefault(); e.stopPropagation(); }
+    if (!document.querySelector('#main')) {
+      if (e.code === 'KeyR') toast('open a chat first');
+      return;
+    }
     const list = messages();
     let cur = sel ? list.indexOf(sel) : -1;
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
@@ -166,6 +190,7 @@ if (typeof document === 'undefined') {
       if (!replyKeyOk(e.repeat, busy)) { e.preventDefault(); e.stopPropagation(); return; }
       const i = replyIndex(cur, list.map((m) => m.getAttribute('data-id')));
       if (i >= 0) reply(list[i]);
+      else toast(list.length ? 'no message of theirs to reply to — pick one with ⌥↑' : 'no messages found in this chat');
     } else return;
     e.preventDefault();
     e.stopPropagation();
